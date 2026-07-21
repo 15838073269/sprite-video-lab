@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
@@ -9,6 +10,46 @@ import server
 
 
 class AiMatteSizingTests(unittest.TestCase):
+    def test_clear_runtime_files_requires_confirmation_and_stays_inside_managed_dirs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            managed_dirs = tuple(work_dir / name for name in ("uploads", "jobs", "exports"))
+            for directory in managed_dirs:
+                directory.mkdir(parents=True)
+                (directory / "generated.bin").write_bytes(b"generated")
+            settings_path = work_dir / "settings.json"
+            settings_path.write_text('{"keep": true}', encoding="utf-8")
+            unmanaged_path = work_dir / "manual-output"
+            unmanaged_path.mkdir()
+            (unmanaged_path / "keep.bin").write_bytes(b"keep")
+            external_export_root = Path(temp_dir) / "external-exports"
+            external_export_root.mkdir()
+            generated_export = external_export_root / "20260721-120000-abcd-export"
+            generated_export.mkdir()
+            (generated_export / "generated.mov").write_bytes(b"generated")
+            downloaded_copy = external_export_root / "downloaded-copy.mov"
+            downloaded_copy.write_bytes(b"keep")
+
+            with (
+                mock.patch.object(server, "WORK_DIR", work_dir),
+                mock.patch.object(server, "EXPORTS_DIR", managed_dirs[2]),
+                mock.patch.object(server, "MANAGED_RUNTIME_DIRS", managed_dirs),
+                mock.patch.object(server, "configured_exports_dir", return_value=external_export_root),
+            ):
+                with self.assertRaises(ValueError):
+                    server.clear_managed_runtime_files(False)
+                self.assertTrue((managed_dirs[0] / "generated.bin").exists())
+
+                result = server.clear_managed_runtime_files(True)
+
+            self.assertEqual(result["cleared"], ["uploads", "jobs", "exports"])
+            self.assertEqual(result["cleared_export_directories"], [generated_export.name])
+            self.assertTrue(all(directory.is_dir() and not any(directory.iterdir()) for directory in managed_dirs))
+            self.assertTrue(settings_path.exists())
+            self.assertTrue((unmanaged_path / "keep.bin").exists())
+            self.assertFalse(generated_export.exists())
+            self.assertTrue(downloaded_copy.exists())
+
     def test_auto_ai_resolution_uses_area_for_wide_images(self):
         image = Image.new("RGBA", (2048, 768))
 

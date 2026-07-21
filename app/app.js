@@ -100,6 +100,7 @@ const MAGIC_RESIZE_MODE_LABELS = {
 let hotReloadVersion = null;
 let hotReloadTimerId = null;
 let uploadDragDepth = 0;
+let skipSessionPersistence = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -128,6 +129,7 @@ function bindElements() {
     "importPathButton",
     "outputPathInput",
     "saveOutputPathButton",
+    "clearRuntimeFilesButton",
     "uploadDropzone",
     "uploadInput",
     "videoName",
@@ -323,6 +325,7 @@ function setMagicUseRealesrgan(enabled, { clearExisting = true } = {}) {
 function bindEvents() {
   els.importPathButton.addEventListener("click", importFromPath);
   els.saveOutputPathButton.addEventListener("click", selectOutputPath);
+  els.clearRuntimeFilesButton.addEventListener("click", clearRuntimeFiles);
   els.uploadInput.addEventListener("change", handleUploadInputChange);
   els.previewFrameButton.addEventListener("click", previewCurrentFrame);
   els.greenToBlackButton.addEventListener("click", applyGreenToBlackPreview);
@@ -1047,6 +1050,9 @@ function applyFormState(snapshot) {
 }
 
 function persistSession() {
+  if (skipSessionPersistence) {
+    return;
+  }
   try {
     const selectionOrder = normalizeSelectionOrder();
     const snapshot = {
@@ -1432,6 +1438,29 @@ async function selectOutputPath() {
       return;
     }
     setStatus(`\u8F93\u51FA\u8DEF\u5F84\u5DF2\u8BBE\u7F6E\uFF1A${data.output_path.path}`, "success");
+  });
+}
+
+async function clearRuntimeFiles() {
+  const confirmed = window.confirm(
+    "确定清空 Sprite Video Lab 的全部内部文件吗？\n\n" +
+      "将删除导入副本、处理帧、预览、MAGIC/线稿缓存，以及输出目录中由本程序创建的时间戳导出文件夹。\n" +
+      "不会删除已经下载/另存的文件，也不会删除输出目录中的其他文件。\n\n" +
+      "此操作无法撤销。"
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  await withBusy(els.clearRuntimeFilesButton, async () => {
+    setStatus("正在清空 WebApp 内部文件...");
+    await apiJson("/api/clear-runtime-files", {
+      method: "POST",
+      body: { confirmed: true },
+    });
+    skipSessionPersistence = true;
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.location.reload();
   });
 }
 

@@ -44,6 +44,10 @@ LINE_CLEANER_DIR = WORK_DIR / "line-cleaner"
 MAGIC_DIR = WORK_DIR / "magic"
 SETTINGS_PATH = WORK_DIR / "settings.json"
 LEGACY_SETTINGS_PATH = DEFAULT_WORK_DIR / "settings.json"
+MANAGED_RUNTIME_DIRS = (UPLOADS_DIR, JOBS_DIR, EXPORTS_DIR, PREVIEWS_DIR, LINE_CLEANER_DIR, MAGIC_DIR)
+GENERATED_EXPORT_DIR_PATTERN = re.compile(
+    r"^\d{8}-\d{6}-[0-9a-f]{4}-(?:export|magic-(?:half|quarter|eighth)-frames)$"
+)
 MAGIC_PREVIEW_LOCK = threading.Lock()
 
 DEFAULT_HOST = "127.0.0.1"
@@ -162,6 +166,51 @@ def ensure_runtime_dirs() -> None:
     for directory in (APP_DIR, WORK_DIR, UPLOADS_DIR, JOBS_DIR, EXPORTS_DIR, PREVIEWS_DIR, LINE_CLEANER_DIR, MAGIC_DIR):
         directory.mkdir(parents=True, exist_ok=True)
     migrate_legacy_settings()
+
+
+def clear_managed_runtime_files(confirmed: bool) -> dict:
+    if confirmed is not True:
+        raise ValueError("必须确认后才能清空 WebApp 文件。")
+
+    work_root = WORK_DIR.resolve()
+    runtime_targets = []
+    for directory in MANAGED_RUNTIME_DIRS:
+        target = directory.resolve()
+        if target.parent != work_root:
+            raise ValueError(f"拒绝清理 WebApp 工作目录之外的路径：{target}")
+        if target.exists() and not target.is_dir():
+            raise ValueError(f"运行目录不是文件夹：{target}")
+        runtime_targets.append(target)
+
+    export_targets = []
+    export_root = configured_exports_dir()
+    if export_root != EXPORTS_DIR.resolve() and export_root.exists():
+        if not export_root.is_dir():
+            raise ValueError(f"输出路径不是文件夹：{export_root}")
+        for child in export_root.iterdir():
+            if not GENERATED_EXPORT_DIR_PATTERN.fullmatch(child.name):
+                continue
+            target = child.resolve()
+            if target.parent != export_root or not target.is_dir():
+                raise ValueError(f"拒绝清理输出目录之外的路径：{target}")
+            export_targets.append(target)
+
+    cleared = []
+    for target in runtime_targets:
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=False, exist_ok=False)
+        cleared.append(target.name)
+
+    cleared_export_directories = []
+    for target in export_targets:
+        shutil.rmtree(target)
+        cleared_export_directories.append(target.name)
+
+    return {
+        "cleared": cleared,
+        "cleared_export_directories": cleared_export_directories,
+    }
 
 
 def migrate_legacy_settings() -> None:
@@ -4362,6 +4411,11 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/api/clear-runtime-files":
+                payload = self.read_json_body()
+                result = clear_managed_runtime_files(payload.get("confirmed") is True)
+                self.send_json({"ok": True, "result": result})
+                return
             if parsed.path == "/api/import-path":
                 payload = self.read_json_body()
                 raw_path = str(payload.get("path") or "").strip().strip("\"'")

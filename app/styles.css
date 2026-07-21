@@ -99,6 +99,36 @@ a {
   min-width: 0;
 }
 
+.clear-runtime-button {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  margin-left: 6px;
+  padding: 0;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: #fffef9;
+  color: var(--accent-strong);
+}
+
+.clear-runtime-button:hover {
+  border-color: #050505;
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.clear-runtime-button svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .brand-mark {
   width: 36px;
   height: 36px;
