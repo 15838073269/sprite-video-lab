@@ -718,6 +718,130 @@ button:focus-visible,
   font-weight: 800;
 }
 
+.quick-reference-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  width: min(48%, 300px);
+  min-height: 38px;
+  padding: 6px 10px 6px 14px;
+  border: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 900;
+  text-align: left;
+}
+
+.quick-reference-toggle::after {
+  content: "+";
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.quick-reference-toggle[aria-expanded="true"]::after {
+  content: "−";
+}
+
+.quick-reference-panel {
+  margin: -2px 0 14px;
+  padding: 12px;
+  border: 2px solid var(--line);
+  border-left: 7px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+
+.quick-reference-intro {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 10px;
+  border-bottom: 2px solid var(--line);
+}
+
+.quick-reference-intro strong {
+  color: var(--accent-strong);
+  font-size: 14px;
+}
+
+.quick-reference-intro span {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.quick-reference-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.quick-reference-section {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(5, 5, 5, 0.24);
+  border-radius: 5px;
+  background: var(--surface);
+}
+
+.quick-reference-wide {
+  grid-column: 1 / -1;
+}
+
+.quick-reference-section h4 {
+  margin: 0 0 8px;
+  color: var(--accent-strong);
+  font-size: 13px;
+}
+
+.quick-reference-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.quick-reference-modes,
+.quick-reference-exports {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.quick-reference-list > div {
+  padding-top: 7px;
+  border-top: 1px dashed rgba(5, 5, 5, 0.24);
+}
+
+.quick-reference-list > div:first-child,
+.quick-reference-modes > div:nth-child(2),
+.quick-reference-exports > div:nth-child(2) {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.quick-reference-list dt {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.quick-reference-list dd {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .algorithm-help {
   grid-column: 1 / -1;
   padding: 0;
@@ -1519,6 +1643,36 @@ button:focus-visible,
 
   .export-option-buttons {
     grid-template-columns: 1fr;
+  }
+
+  .matte-algorithm-group .group-title,
+  .quick-reference-intro {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .quick-reference-toggle {
+    width: 100%;
+  }
+
+  .quick-reference-grid,
+  .quick-reference-modes,
+  .quick-reference-exports {
+    grid-template-columns: 1fr;
+  }
+
+  .quick-reference-wide {
+    grid-column: auto;
+  }
+
+  .quick-reference-intro span {
+    text-align: left;
+  }
+
+  .quick-reference-modes > div:nth-child(2),
+  .quick-reference-exports > div:nth-child(2) {
+    padding-top: 7px;
+    border-top: 1px dashed rgba(5, 5, 5, 0.24);
   }
 
   .import-grid,

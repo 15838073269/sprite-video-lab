@@ -232,6 +232,66 @@
                 <div class="control-group matte-algorithm-group">
                   <div class="group-title">
                     <span>去背景</span>
+                    <button id="quickReferenceToggle" class="quick-reference-toggle" type="button" aria-expanded="false" aria-controls="quickReferencePanel">速查表</button>
+                  </div>
+                  <div id="quickReferencePanel" class="quick-reference-panel" hidden>
+                    <div class="quick-reference-intro">
+                      <strong>先看素材，再选处理方式</strong>
+                      <span>这里只放常用判断；模型和运行环境细节仍以 README 与 AI_MATTING.md 为准。</span>
+                    </div>
+                    <div class="quick-reference-grid">
+                      <section class="quick-reference-section">
+                        <h4>基础输出</h4>
+                        <dl class="quick-reference-list">
+                          <div><dt>保留每 N 帧</dt><dd>1 为每帧都保留；数字越大，动画帧越少。</dd></div>
+                          <div><dt>输出尺寸</dt><dd>按源素材高度缩放；100 为原尺寸，50 为一半。</dd></div>
+                          <div><dt>保留源画布</dt><dd>保持原始宽高和主体位置；视频会固定使用此模式。</dd></div>
+                          <div><dt>方形 / 底部</dt><dd>适合站立、行走等需要统一落地点的角色。</dd></div>
+                          <div><dt>方形 / 居中</dt><dd>适合图标、爆炸、光球等没有地面的素材。</dd></div>
+                          <div><dt>画布边距</dt><dd>给图片或序列帧增加透明留白；视频固定为 0。</dd></div>
+                        </dl>
+                      </section>
+
+                      <section class="quick-reference-section">
+                        <h4>背景目标与后处理</h4>
+                        <dl class="quick-reference-list">
+                          <div><dt>自动取背景色</dt><dd>纯色背景优先使用，由画面边缘自动判断颜色。</dd></div>
+                          <div><dt>手动指定颜色</dt><dd>自动取色不准时，明确指定绿、蓝、白或其他底色。</dd></div>
+                          <div><dt>Luma 背景</dt><dd>亮特效配黑底选“抠除黑色”；暗素材配白底选“抠除白色”。</dd></div>
+                          <div><dt>残绿转黑</dt><dd>适合需要黑色边缘的 VFX，不适合普通彩色角色。</dd></div>
+                          <div><dt>残绿去饱和</dt><dd>降低绿边颜色污染，通常比直接涂黑更自然。</dd></div>
+                          <div><dt>半透明转黑 / 不透明</dt><dd>用于特殊硬边风格；会损失柔光和半透明细节。</dd></div>
+                        </dl>
+                      </section>
+
+                      <section class="quick-reference-section quick-reference-wide">
+                        <h4>处理方式</h4>
+                        <dl class="quick-reference-list quick-reference-modes">
+                          <div><dt>chroma key</dt><dd>绿幕、蓝幕、白底、灰底等受控纯色背景，速度最快。</dd></div>
+                          <div><dt>只用 BiRefNet</dt><dd>真实背景或 AI 生成背景，主体轮廓明确时使用。</dd></div>
+                          <div><dt>只用 CorridorKey</dt><dd>标准绿幕或蓝幕，重点修复头发、柔边和颜色溢出。</dd></div>
+                          <div><dt>只用 Luma</dt><dd>黑底或白底的火焰、闪电、粒子和亮部 VFX。</dd></div>
+                          <div><dt>BiRefNet 粗蒙版 / CorridorKey 精修边缘</dt><dd>先找主体，再重建绿幕或蓝幕边缘。</dd></div>
+                          <div><dt>BiRefNet 后再用 CorridorKey 收紧抠图</dt><dd>只进一步删除背景，适合边缘仍有幕布残留。</dd></div>
+                          <div><dt>BiRefNet 保主体 / Luma 补亮部</dt><dd>保住主体，同时补回火焰、闪电、粒子等亮部。</dd></div>
+                          <div><dt>BiRefNet 后再用 Luma 收紧抠图</dt><dd>按亮度进一步删除背景，适合主体外仍有亮度杂点。</dd></div>
+                          <div><dt>BiRefNet + Luma 合并后 / CorridorKey 精修</dt><dd>兼顾主体、亮部和绿蓝幕边缘，处理最重。</dd></div>
+                          <div><dt>不去背景</dt><dd>透明 PNG 或已经抠好的序列帧，只做缩放、对齐和导出。</dd></div>
+                        </dl>
+                      </section>
+
+                      <section class="quick-reference-section quick-reference-wide">
+                        <h4>导出与 MAGIC</h4>
+                        <dl class="quick-reference-list quick-reference-exports">
+                          <div><dt>Frames</dt><dd>导出 PNG 序列和 frames.json；JSON 记录每帧时长。</dd></div>
+                          <div><dt>Spritesheet</dt><dd>导出固定网格图集和坐标、尺寸、时长 JSON。</dd></div>
+                          <div><dt>透明 MOV</dt><dd>适合需要 alpha 视频的合成或剪辑流程。</dd></div>
+                          <div><dt>GIF</dt><dd>适合快速预览，不保留完整半透明质量。</dd></div>
+                          <div><dt>MAGIC 硬</dt><dd>nearest-neighbor 缩小，适合像素硬边 Sprite。</dd></div>
+                          <div><dt>MAGIC 软</dt><dd>BOX 缩小，边缘更平滑，适合柔和抗锯齿素材。</dd></div>
+                        </dl>
+                      </section>
+                    </div>
                   </div>
                   <div class="form-grid">
                     <label class="field checkbox-field">

@@ -216,6 +216,8 @@ function bindElements() {
     "previewProcessedZoomInButton",
     "processStepShell",
     "processLockNote",
+    "quickReferenceToggle",
+    "quickReferencePanel",
     "processButton",
     "jobSummary",
     "selectionCount",
@@ -339,6 +341,11 @@ function bindEvents() {
   els.semiTransparentToOpaqueButton.addEventListener("click", applySemiTransparentToOpaquePreview);
   els.savePreviewButton.addEventListener("click", downloadProcessPreviewResult);
   els.processButton.addEventListener("click", processVideo);
+  els.quickReferenceToggle.addEventListener("click", () => {
+    const shouldExpand = els.quickReferencePanel.hidden;
+    els.quickReferencePanel.hidden = !shouldExpand;
+    els.quickReferenceToggle.setAttribute("aria-expanded", String(shouldExpand));
+  });
   els.exportButton.addEventListener("click", toggleExportOptions);
   els.exportFramesButton.addEventListener("click", () => exportSelectedFormat("frames", els.exportFramesButton));
   els.exportSpriteSheetButton.addEventListener("click", () => exportSelectedFormat("sprite_sheet", els.exportSpriteSheetButton));

@@ -40,6 +40,7 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - 帧选择、动画预览，以及按需选择 Frames、Spritesheet、透明 MOV 或 GIF 导出。
 - Frames 导出会附带 `frames.json`，按最终帧顺序记录每一帧的持续时间。
 - Frames、Spritesheet、透明 MOV 和 GIF 生成完成后都会直接打开对应文件夹。
+- “去背景”卡片内置可展开的“速查表”，可在设置参数时直接查看画布、抠图、后处理、导出和 MAGIC 选项的用途。
 
 ## MAGIC 二次处理
 
