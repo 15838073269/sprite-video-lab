@@ -3206,8 +3206,8 @@ async function exportSelectedFormat(exportFormat, button) {
   }
 
   const labels = {
-    frames: "Frames + JSON",
-    sprite_sheet: "Sprite Sheet + JSON",
+    frames: "Frames",
+    sprite_sheet: "Spritesheet",
     mov: "\u900F\u660E MOV",
     gif: "GIF",
   };
@@ -3225,6 +3225,17 @@ async function exportSelectedFormat(exportFormat, button) {
         export_format: exportFormat,
       },
     });
+    const outputFolder = exportFormat === "frames" ? data.export.frames_dir : exportFormat === "sprite_sheet" ? data.export.sheet_dir : "";
+    if (outputFolder) {
+      state.exportResult = null;
+      renderExportResult();
+      persistSession();
+      const opened = await openPath(outputFolder);
+      if (opened) {
+        setStatus(`${label} \u5BFC\u51FA\u5B8C\u6210\uFF0C\u5DF2\u6253\u5F00\u6587\u4EF6\u5939\u3002`, "success");
+      }
+      return;
+    }
     state.exportResult = data.export;
     renderExportResult();
     setStatus(`${label} \u5BFC\u51FA\u5B8C\u6210\uFF0C\u5DF2\u5199\u5165\u672C\u5730\u5BFC\u51FA\u76EE\u5F55\u3002`, "success");
@@ -3232,7 +3243,7 @@ async function exportSelectedFormat(exportFormat, button) {
 }
 
 function renderExportResult() {
-  if (!state.exportResult) {
+  if (!state.exportResult || state.exportResult.frames_dir || state.exportResult.sheet_dir) {
     els.exportResult.hidden = true;
     els.exportResult.innerHTML = "";
     return;
@@ -3240,9 +3251,6 @@ function renderExportResult() {
 
   els.exportResult.hidden = false;
   const fileLinks = [
-    ["Frames JSON", state.exportResult.frames_json_url, state.exportResult.frames_json_name],
-    ["Sprite Sheet", state.exportResult.sheet_url, state.exportResult.sheet_name],
-    ["Sprite Sheet JSON", state.exportResult.sheet_json_url, state.exportResult.sheet_json_name],
     ["MOV", state.exportResult.mov_url || state.exportResult.video_url, state.exportResult.mov_name || state.exportResult.video_name],
     ["GIF", state.exportResult.gif_url, state.exportResult.gif_name],
   ]
@@ -3250,19 +3258,11 @@ function renderExportResult() {
     .map(([label, url, name]) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${label}: ${escapeHtml(name || url)}</a>`)
     .join("");
   const exportedContents = [
-    state.exportResult.frames_dir ? "Frames + JSON" : "",
-    state.exportResult.sheet_dir ? "Sprite Sheet + JSON" : "",
     state.exportResult.mov_url || state.exportResult.video_url ? "\u900F\u660E MOV" : "",
     state.exportResult.gif_url ? "GIF" : "",
   ]
     .filter(Boolean)
     .join(" / ");
-  const framesButton = state.exportResult.frames_dir
-    ? `<button id="openFramesDirButton" class="ghost-button" type="button">\u6253\u5f00 Frames + JSON</button>`
-    : "";
-  const sheetButton = state.exportResult.sheet_dir
-    ? `<button id="openSheetDirButton" class="ghost-button" type="button">\u6253\u5F00 Sprite Sheet + JSON</button>`
-    : "";
 
   els.exportResult.innerHTML = `
     <div class="result-summary">
@@ -3270,24 +3270,9 @@ function renderExportResult() {
       ${summaryCard("\u5bfc\u51fa\u5185\u5bb9", escapeHtml(exportedContents || "\u5DF2\u5BFC\u51FA"))}
     </div>
     <div class="link-list">
-      ${framesButton}
-      ${sheetButton}
       ${fileLinks}
     </div>
   `;
-
-  const openFramesDirButton = document.getElementById("openFramesDirButton");
-  if (openFramesDirButton) {
-    openFramesDirButton.addEventListener("click", async () => {
-      await openPath(state.exportResult.frames_dir || state.exportResult.output_dir);
-    });
-  }
-  const openSheetDirButton = document.getElementById("openSheetDirButton");
-  if (openSheetDirButton) {
-    openSheetDirButton.addEventListener("click", async () => {
-      await openPath(state.exportResult.sheet_dir);
-    });
-  }
   persistSession();
 }
 
@@ -3368,8 +3353,10 @@ async function openPath(path) {
       method: "POST",
       body: { path },
     });
+    return true;
   } catch (error) {
     setStatus(`\u6253\u5f00\u76ee\u5f55\u5931\u8d25\uff1a${error.message}`, "error");
+    return false;
   }
 }
 

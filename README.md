@@ -11,7 +11,7 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - 用 Luma 保留发光、火焰、闪电、粒子等亮部特效。
 - 统一帧尺寸，默认保留源画布，也支持方形落地/居中画布。
 - 对已处理帧执行 MAGIC 二次处理：可选 Real-ESRGAN anime x4 超分，并输出原尺寸 1/2、1/4、1/8 三档。
-- 按需导出 Frames + JSON、Sprite Sheet + JSON、透明 MOV 或 GIF，不会自动生成未选择的格式。
+- 按需导出 Frames、Spritesheet、透明 MOV 或 GIF，不会自动生成未选择的格式。
 
 项目优先服务 Windows 本地工作流，但运行时很轻：Python、Pillow、ffmpeg，以及原生 HTML/CSS/JavaScript。
 
@@ -37,8 +37,9 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - 实验性线稿清理页：支持 Lanczos 缩小和 Real-ESRGAN anime 整线后缩小。
 - 反向动画预览和反向导出。
 - MAGIC 帧预览：对选中帧可选择使用 Real-ESRGAN anime 放大后缩小，或直接本地缩小；支持硬边/软边缩放算法切换，并可上下对比原帧、1/2、1/4、1/8 三档结果。
-- 帧选择、动画预览，以及按需选择 Frames、Sprite Sheet、透明 MOV 或 GIF 导出。
+- 帧选择、动画预览，以及按需选择 Frames、Spritesheet、透明 MOV 或 GIF 导出。
 - Frames 导出会附带 `frames.json`，按最终帧顺序记录每一帧的持续时间。
+- Frames 和 Spritesheet 生成完成后会直接打开对应文件夹。
 
 ## MAGIC 二次处理
 
@@ -115,7 +116,7 @@ http://127.0.0.1:8894/app/line-cleaner-experiment.html
 3. 设置抽帧间隔和输出尺寸，选择抠图方式；视频会保留源画布，图片和序列帧还可选择方形画布。
 4. 先预览当前帧，确认效果后开始批处理。
 5. 检查并选择需要的帧，按需反向播放或执行 MAGIC。
-6. 点击“导出选中帧”展开格式选项，再选择 Frames、Sprite Sheet、透明 MOV 或 GIF；只有选中的格式会开始生成。
+6. 点击“导出选中帧”展开格式选项，再选择 Frames、Spritesheet、透明 MOV 或 GIF；只有选中的格式会开始生成。Frames 和 Spritesheet 完成后会直接打开对应文件夹。
 
 抠图方式的用途见上方“抠图模式”；AI 环境和模型细节见 [AI_MATTING.md](./AI_MATTING.md)。
 
