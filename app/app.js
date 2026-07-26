@@ -3225,20 +3225,18 @@ async function exportSelectedFormat(exportFormat, button) {
         export_format: exportFormat,
       },
     });
-    const outputFolder = exportFormat === "frames" ? data.export.frames_dir : exportFormat === "sprite_sheet" ? data.export.sheet_dir : "";
-    if (outputFolder) {
-      state.exportResult = null;
-      renderExportResult();
-      persistSession();
-      const opened = await openPath(outputFolder);
-      if (opened) {
-        setStatus(`${label} \u5BFC\u51FA\u5B8C\u6210\uFF0C\u5DF2\u6253\u5F00\u6587\u4EF6\u5939\u3002`, "success");
-      }
-      return;
-    }
-    state.exportResult = data.export;
+    const outputFolder = exportFormat === "frames"
+      ? data.export.frames_dir
+      : exportFormat === "sprite_sheet"
+      ? data.export.sheet_dir
+      : data.export.output_dir;
+    state.exportResult = null;
     renderExportResult();
-    setStatus(`${label} \u5BFC\u51FA\u5B8C\u6210\uFF0C\u5DF2\u5199\u5165\u672C\u5730\u5BFC\u51FA\u76EE\u5F55\u3002`, "success");
+    persistSession();
+    const opened = await openPath(outputFolder);
+    if (opened) {
+      setStatus(`${label} \u5BFC\u51FA\u5B8C\u6210\uFF0C\u5DF2\u6253\u5F00\u6587\u4EF6\u5939\u3002`, "success");
+    }
   });
 }
 
