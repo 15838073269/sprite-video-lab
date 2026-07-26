@@ -11,7 +11,7 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - 用 Luma 保留发光、火焰、闪电、粒子等亮部特效。
 - 统一帧尺寸，默认保留源画布，也支持方形落地/居中画布。
 - 对已处理帧执行 MAGIC 二次处理：可选 Real-ESRGAN anime x4 超分，并输出原尺寸 1/2、1/4、1/8 三档。
-- 导出 frames 文件夹和自动时间命名的透明 WebM。
+- 导出 frames 文件夹、透明 MOV、GIF、Sprite Sheet 和 JSON。
 
 项目优先服务 Windows 本地工作流，但运行时很轻：Python、Pillow、ffmpeg，以及原生 HTML/CSS/JavaScript。
 
@@ -25,12 +25,11 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - 视频区间预览，支持按帧设置起止位置。
 - 批处理前先单帧预览参数效果。
 - 默认保留源视频/图片画布，方便后续动画对齐。
-- 纯色/绿幕抠图，支持阈值、软边、去色溢出和 Halo 收缩。
+- 纯色/绿幕抠图，程序自动处理阈值、软边、去色溢出和边缘收缩。
 - BiRefNet AI 主体抠图。
 - Luma 亮度抠图，用来保留发光、火焰、闪电、粒子和亮部 VFX。
 - CorridorKey 绿幕/蓝幕边缘精修和前景颜色重建。
 - BiRefNet 与 Luma/CorridorKey 可选择“补亮部/精修边缘”或“收紧抠图”两类组合方式。
-- 主体保护预设，减少 BiRefNet/Luma 把主体内部抠成半透明的问题。
 - 单帧预览支持原始抽帧全分辨率查看，处理后预览可切换棋盘格或指定纯色背景。
 - 预览和批处理后处理：残绿涂黑、残绿去饱和、半透明像素涂黑、半透明像素转不透明。
 - BiRefNet 弱蒙版会自动回退到 general 模型，避免小尺寸插画/GIF 被抠成全透明。
@@ -38,7 +37,7 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - 实验性线稿清理页：支持 Lanczos 缩小和 Real-ESRGAN anime 整线后缩小。
 - 反向动画预览和反向导出。
 - MAGIC 帧预览：对选中帧可选择使用 Real-ESRGAN anime 放大后缩小，或直接本地缩小；支持硬边/软边缩放算法切换，并可上下对比原帧、1/2、1/4、1/8 三档结果。
-- 帧选择、动画预览、frames 文件夹导出和自动时间命名的透明 WebM 导出。
+- 帧选择、动画预览，以及 frames、透明 MOV、GIF、Sprite Sheet 和 JSON 导出。
 
 ## MAGIC 二次处理
 
@@ -53,7 +52,7 @@ MAGIC 按钮旁的 `硬` / `软` 选项决定最终缩小的算法：
 - `硬`：nearest-neighbor 缩小，保留像素硬边缘，适合 Sprite 动画。
 - `软`：BOX 缩小，会平滑边缘，适合需要更柔和抗锯齿的素材。
 
-每个 MAGIC 预览框都有自己的“导出处理后帧”按钮。导出结果会写入 `work/exports/`，并在页面底部生成“打开 frames 文件夹”和透明 WebM 链接。
+每个 MAGIC 预览框都有自己的“导出处理后帧”按钮。导出结果会写入 `work/exports/`，并在页面底部提供 frames 文件夹、透明 MOV、GIF、Sprite Sheet 和 JSON。
 
 ## 抠图模式
 
@@ -70,7 +69,7 @@ Sprite Video Lab 目前提供这些背景处理模式：
 - `BiRefNet + Luma 合并后 / CorridorKey 精修`：先合成主体 alpha 和亮度 alpha，再用 CorridorKey 做边缘/颜色重建。
 - `不抠图`：素材已经带透明通道时，只做缩放、对齐和导出。
 
-灰底、白底、黑底素材通常不需要去色溢出；绿幕/蓝幕素材再开启 despill 和 CorridorKey 会更稳。
+灰底、白底、黑底素材优先使用 `chroma key`；需要重建绿幕/蓝幕边缘时，再选择包含 CorridorKey 的处理方式。
 
 ## 环境要求
 
@@ -108,10 +107,15 @@ http://127.0.0.1:8894/app/line-cleaner-experiment.html
 
 ## 使用说明
 
-完整的导入、截取、抠图模式、Luma 主体保护、CorridorKey 精修、后处理、动画预览、反向导出和排错说明见：
+界面按以下顺序使用：
 
-- [中文使用说明](./USAGE.zh-CN.md)
-- [English usage guide](./USAGE.md)
+1. 导入本地视频、GIF、图片或序列帧。
+2. 预览素材并设置起止帧。
+3. 设置抽帧间隔和输出尺寸，选择抠图方式；视频会保留源画布，图片和序列帧还可选择方形画布。
+4. 先预览当前帧，确认效果后开始批处理。
+5. 检查并选择需要的帧，按需反向播放或执行 MAGIC，最后导出。
+
+抠图方式的用途见上方“抠图模式”；AI 环境和模型细节见 [AI_MATTING.md](./AI_MATTING.md)。
 
 ## 环境变量
 
@@ -162,10 +166,6 @@ work/                             运行时输出目录，已被 git 忽略
 - AI 模型会在第一次选择相关模式时由本地运行时下载。
 - BiRefNet 通过 Hugging Face 的 `trust_remote_code=True` 加载远程模型代码；如果需要更严格的供应链控制，请审查并固定模型 revision。
 - CorridorKey 是独立项目，重新分发或用于商业推理服务前请确认它的许可证。
-
-## English
-
-This README is Chinese-first. For English instructions, see [USAGE.md](./USAGE.md).
 
 ## License
 

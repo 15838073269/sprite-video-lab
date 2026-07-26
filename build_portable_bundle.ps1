@@ -89,8 +89,6 @@ $projectFiles = @(
     "server.py",
     "start_sprite_video_lab_portable.bat",
     "README.md",
-    "USAGE.md",
-    "USAGE.zh-CN.md",
     "AI_MATTING.md",
     "LICENSE",
     "VERSION"
