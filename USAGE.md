@@ -84,7 +84,7 @@ If the exported animation feels jumpy, lower this value.
 
 ### Output Scale
 
-The default is `100%`, so the output canvas height automatically matches the input media height. Use `75%`, `50%`, `25%`, or another percentage when you intentionally want smaller, lower-resolution output.
+The default is `100%`, so the output canvas matches the imported media canvas. Use `75%`, `50%`, `25%`, or another percentage when you intentionally want smaller, lower-resolution output.
 
 Common values:
 
@@ -98,15 +98,15 @@ Larger output scales increase processing time and file size.
 
 Canvas layout controls each PNG frame's dimensions and where the subject sits.
 
-- `Auto width centered`: best for wide attacks, trails, VFX strips, and horizontal motion.
+- `Preserve source canvas`: keeps the imported video, image, or image-sequence canvas size for easier animation alignment. Video uploads always use this mode so multiple exported segments from the same source stay aligned.
 - `Square bottom aligned`: best for characters with a ground contact point.
 - `Square centered`: best for icons, magic orbs, explosions, and effects without a ground baseline.
 
-If the character appears to jump around in animation preview, increase padding or switch to a square layout.
+If the character appears to jump around in animation preview, keep `Preserve source canvas` selected. Use square layouts only when you intentionally want a normalized square asset.
 
 ### Canvas Padding
 
-The default is `0`, which preserves the input size. Increase padding only when motion, weapons, or glow need extra transparent space.
+The default is `0`, which preserves the input size. For video uploads this stays locked to `0` so every exported segment keeps the same source canvas. Increase padding only for image/image-sequence workflows where you accept a recomputed output canvas.
 
 Typical ranges:
 
@@ -473,8 +473,8 @@ When reverse export is enabled, both `frames/` and the MOV use the reversed sele
 
 ### Wide Attack Trail
 
-- Canvas layout: `Auto width centered`
-- Padding: `24` to `48`
+- Canvas layout: `Preserve source canvas`
+- Padding: `0` when the imported video already contains the full motion area
 - Keep every N frames: `1` or `2`
 - Check the left and right edges before export
 

@@ -128,6 +128,47 @@ class AiMatteSizingTests(unittest.TestCase):
     def test_luma_auto_direction_uses_black_background_as_transparent(self):
         self.assertEqual(server.resolve_luma_polarity("auto", (0, 0, 0)), "bright")
 
+    def test_auto_video_preserves_source_canvas_by_default(self):
+        self.assertTrue(server.should_preserve_source_canvas("video", 0, "auto"))
+        self.assertTrue(server.should_preserve_source_canvas("video", 1, "auto"))
+        self.assertTrue(server.should_preserve_source_canvas("video", 0, "square_bottom"))
+        self.assertEqual(server.effective_canvas_settings("video", 24, "square_center"), (0, "auto"))
+
+    def test_source_canvas_resize_keeps_video_frame_dimensions(self):
+        first = Image.new("RGBA", (96, 54), (0, 0, 0, 0))
+        second = Image.new("RGBA", (96, 54), (0, 0, 0, 0))
+        for y in range(10, 40):
+            for x in range(20, 42):
+                first.putpixel((x, y), (255, 255, 255, 255))
+        for y in range(12, 44):
+            for x in range(48, 76):
+                second.putpixel((x, y), (255, 255, 255, 255))
+
+        rendered, bboxes, scale, canvas_size = server.resize_frames_on_source_canvas(
+            [first, second],
+            1.0,
+        )
+
+        self.assertEqual(scale, 1.0)
+        self.assertEqual(canvas_size, (96, 54))
+        self.assertEqual([frame.size for frame in rendered], [(96, 54), (96, 54)])
+        self.assertEqual(bboxes, [(20, 10, 42, 40), (48, 12, 76, 44)])
+
+    def test_source_canvas_resize_scales_whole_canvas_not_subject_bbox(self):
+        frame = Image.new("RGBA", (100, 60), (0, 0, 0, 0))
+        for y in range(20, 40):
+            for x in range(70, 90):
+                frame.putpixel((x, y), (255, 255, 255, 255))
+
+        rendered, _bboxes, scale, canvas_size = server.resize_frames_on_source_canvas(
+            [frame],
+            0.5,
+        )
+
+        self.assertEqual(scale, 0.5)
+        self.assertEqual(canvas_size, (50, 30))
+        self.assertEqual(rendered[0].size, (50, 30))
+
     def test_magic_upscale_falls_back_when_realesrgan_drops_alpha(self):
         source = Image.new("RGBA", (20, 10), (0, 0, 0, 0))
         for y in range(2, 8):

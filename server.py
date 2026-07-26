@@ -2317,7 +2317,15 @@ def stable_resize_frames(
 
 
 def should_preserve_source_canvas(media_type: str, reduce_px: int, canvas_mode: str) -> bool:
+    if media_type == "video":
+        return True
     return media_type in {"image", "image_sequence"} and reduce_px <= 0 and normalize_canvas_mode(canvas_mode) == "auto"
+
+
+def effective_canvas_settings(media_type: str, reduce_px: int, canvas_mode: str) -> tuple[int, str]:
+    if media_type == "video":
+        return 0, "auto"
+    return reduce_px, normalize_canvas_mode(canvas_mode)
 
 
 def resize_frames_on_source_canvas(
@@ -2495,6 +2503,7 @@ def process_video_to_job(
 ) -> dict:
     source_path, media_type = source_media_entry(upload_id)
     info = upload_media_info(upload_id, source_path, media_type)
+    reduce_px, canvas_mode = effective_canvas_settings(media_type, reduce_px, canvas_mode)
     start_time = max(0.0, start_time)
     duration = safe_float(info.get("duration"), 0.0)
     if media_type == "video" and duration > 0:
@@ -2955,6 +2964,7 @@ def preview_frame(
 ) -> dict:
     source_path, media_type = source_media_entry(upload_id)
     info = upload_media_info(upload_id, source_path, media_type)
+    reduce_px, canvas_mode = effective_canvas_settings(media_type, reduce_px, canvas_mode)
     duration = safe_float(info.get("duration"), 0.0)
     if media_type == "video" and duration > 0:
         sample_time = clamp_float(sample_time, 0.0, duration)

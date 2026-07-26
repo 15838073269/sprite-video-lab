@@ -833,6 +833,14 @@ function currentOutputScale() {
   return normalizeOutputScalePercent(els.outputScaleInput.value) / 100;
 }
 
+function effectiveCanvasModeForProcessing() {
+  return isVideoUpload() ? "auto" : els.canvasModeInput.value;
+}
+
+function effectiveReducePxForProcessing() {
+  return isVideoUpload() ? 0 : Number(els.reducePxInput.value || 0);
+}
+
 function outputScalePercentFromLegacyTarget(targetSize) {
   const height = Number(currentUploadInfo().height || 0);
   const target = Number(targetSize || 0);
@@ -914,8 +922,8 @@ function collectProcessingPayload() {
     end_frame: state.segment.endFrame,
     keep_every: Number(els.keepEveryInput.value || 1),
     output_scale: currentOutputScale(),
-    canvas_mode: els.canvasModeInput.value,
-    reduce_px: Number(els.reducePxInput.value || 0),
+    canvas_mode: effectiveCanvasModeForProcessing(),
+    reduce_px: effectiveReducePxForProcessing(),
     chroma_enabled: els.chromaEnabledInput.checked,
     matte_mode: currentMatteMode(),
     key_mode: els.keyModeInput.value,
@@ -959,6 +967,7 @@ function applyFormState(snapshot) {
     els.canvasModeInput.value = snapshot.canvas_mode;
   }
   if (snapshot.reduce_px != null) els.reducePxInput.value = String(snapshot.reduce_px);
+  syncSizingControlsForUpload();
   if (snapshot.chroma_enabled != null) els.chromaEnabledInput.checked = Boolean(snapshot.chroma_enabled);
   if (snapshot.matte_mode && [...els.matteModeInput.options].some((option) => option.value === snapshot.matte_mode)) {
     els.matteModeInput.value = snapshot.matte_mode;
@@ -1373,7 +1382,7 @@ function formatCanvasModeLabel(value) {
   if (value === "custom") return "\u539F\u59CB\u5E27\u5C3A\u5BF8";
   if (value === "square_bottom") return "\u65B9\u5F62 / \u5E95\u90E8";
   if (value === "square_center") return "\u65B9\u5F62 / \u5C45\u4E2D";
-  return "\u81EA\u52A8\u5BBD\u5EA6 / \u5C45\u4E2D";
+  return "\u4FDD\u7559\u6E90\u753B\u5E03";
 }
 
 function formatOutputScaleLabel(value) {
@@ -1615,6 +1624,17 @@ function syncResultActions() {
 function resetSizingControlsForNewUpload() {
   els.outputScaleInput.value = String(OUTPUT_SCALE_DEFAULT_PERCENT);
   els.reducePxInput.value = "0";
+  syncSizingControlsForUpload();
+}
+
+function syncSizingControlsForUpload() {
+  const forceSourceCanvas = isVideoUpload();
+  if (forceSourceCanvas) {
+    els.canvasModeInput.value = "auto";
+    els.reducePxInput.value = "0";
+  }
+  els.canvasModeInput.disabled = forceSourceCanvas;
+  els.reducePxInput.disabled = forceSourceCanvas;
 }
 
 function applyUpload(upload, { resetSizing = true } = {}) {
@@ -1630,6 +1650,7 @@ function applyUpload(upload, { resetSizing = true } = {}) {
   if (resetSizing) {
     resetSizingControlsForNewUpload();
   }
+  syncSizingControlsForUpload();
 
   const info = currentUploadInfo(upload);
   const mediaType = uploadMediaType(upload);
