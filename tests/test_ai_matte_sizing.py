@@ -169,6 +169,99 @@ class AiMatteSizingTests(unittest.TestCase):
         self.assertEqual(canvas_size, (50, 30))
         self.assertEqual(rendered[0].size, (50, 30))
 
+    def test_frames_export_only_copies_frames_and_writes_per_frame_durations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            jobs_dir = root / "jobs"
+            exports_dir = root / "exports"
+            job_id = "export-frames"
+            processed_dir = jobs_dir / job_id / "processed"
+            processed_dir.mkdir(parents=True)
+            exports_dir.mkdir()
+            for index, color in enumerate(((255, 0, 0, 255), (0, 0, 255, 255)), start=1):
+                Image.new("RGBA", (8, 6), color).save(processed_dir / f"source_{index:03d}.png")
+
+            with (
+                mock.patch.object(server, "JOBS_DIR", jobs_dir),
+                mock.patch.object(server, "configured_exports_dir", return_value=exports_dir),
+            ):
+                server.save_job_manifest(
+                    job_id,
+                    {
+                        "frames": [
+                            {"index": 0, "name": "source_001.png"},
+                            {"index": 1, "name": "source_002.png"},
+                        ]
+                    },
+                )
+                result = server.export_job(job_id, [1, 0], 75, "frames")
+
+            output_dir = Path(result["output_dir"])
+            frames_dir = Path(result["frames_dir"])
+            metadata = json.loads((frames_dir / "frames.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["export_format"], "frames")
+            self.assertEqual(metadata["frame_duration_ms"], 75)
+            self.assertEqual(metadata["total_duration_ms"], 150)
+            self.assertEqual(
+                metadata["frames"],
+                [
+                    {"index": 0, "source_index": 1, "file": "frame_001.png", "duration_ms": 75},
+                    {"index": 1, "source_index": 0, "file": "frame_002.png", "duration_ms": 75},
+                ],
+            )
+            self.assertEqual(sorted(path.name for path in frames_dir.iterdir()), ["frame_001.png", "frame_002.png", "frames.json"])
+            self.assertFalse((output_dir / "sprite-sheet").exists())
+            self.assertEqual(list(output_dir.glob("*.mov")), [])
+            self.assertEqual(list(output_dir.glob("*.gif")), [])
+
+    def test_each_non_frame_export_only_runs_its_selected_generator(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            jobs_dir = root / "jobs"
+            exports_dir = root / "exports"
+            job_id = "export-formats"
+            processed_dir = jobs_dir / job_id / "processed"
+            processed_dir.mkdir(parents=True)
+            exports_dir.mkdir()
+            Image.new("RGBA", (8, 6), (255, 255, 255, 255)).save(processed_dir / "source.png")
+
+            def fake_mov(_paths, _sizes, output_path, _width, _height, _duration):
+                output_path.write_bytes(b"mov")
+
+            def fake_gif(_paths, _sizes, output_path, _width, _height, _duration):
+                output_path.write_bytes(b"gif")
+
+            def fake_sheet(_paths, _sizes, sheet_path, metadata_path, width, height, duration):
+                sheet_path.write_bytes(b"sheet")
+                metadata_path.write_text("{}", encoding="utf-8")
+                return {"columns": 1, "rows": 1, "width": width, "height": height, "duration_ms": duration}
+
+            with (
+                mock.patch.object(server, "JOBS_DIR", jobs_dir),
+                mock.patch.object(server, "configured_exports_dir", return_value=exports_dir),
+                mock.patch.object(server, "save_alpha_mov", side_effect=fake_mov) as mov_mock,
+                mock.patch.object(server, "save_gif", side_effect=fake_gif) as gif_mock,
+                mock.patch.object(server, "save_sprite_sheet", side_effect=fake_sheet) as sheet_mock,
+            ):
+                server.save_job_manifest(job_id, {"frames": [{"index": 0, "name": "source.png"}]})
+                mov_result = server.export_job(job_id, [0], 100, "mov")
+                gif_result = server.export_job(job_id, [0], 100, "gif")
+                sheet_result = server.export_job(job_id, [0], 100, "sprite_sheet")
+
+            self.assertEqual((mov_mock.call_count, gif_mock.call_count, sheet_mock.call_count), (1, 1, 1))
+            self.assertEqual(set(path.suffix for path in Path(mov_result["output_dir"]).iterdir()), {".mov"})
+            self.assertEqual(set(path.suffix for path in Path(gif_result["output_dir"]).iterdir()), {".gif"})
+            self.assertEqual(
+                sorted(path.name for path in Path(sheet_result["sheet_dir"]).iterdir()),
+                ["sheet.json", "sheet.png"],
+            )
+            for result in (mov_result, gif_result, sheet_result):
+                self.assertFalse((Path(result["output_dir"]) / "frames").exists())
+
+    def test_export_rejects_unknown_format_before_creating_output(self):
+        with self.assertRaisesRegex(ValueError, "unsupported export format"):
+            server.normalize_export_format("everything")
+
     def test_magic_upscale_falls_back_when_realesrgan_drops_alpha(self):
         source = Image.new("RGBA", (20, 10), (0, 0, 0, 0))
         for y in range(2, 8):

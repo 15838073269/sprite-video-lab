@@ -547,7 +547,7 @@
           </div>
 
           <div class="export-bar">
-            <button id="exportButton" class="primary-button large" type="button">导出选中帧</button>
+            <button id="exportButton" class="primary-button large" type="button" aria-expanded="false" aria-controls="exportOptions">导出选中帧</button>
             <div class="magic-controls">
               <label class="magic-realesrgan-option">
                 <input id="magicUseRealesrganInput" type="checkbox" checked>
@@ -565,6 +565,16 @@
               </div>
             </div>
             <button id="magicButton" class="magic-button large" type="button">MAGIC</button>
+          </div>
+          <div id="exportOptions" class="export-options" hidden>
+            <strong>选择需要生成的内容</strong>
+            <span>只会生成你点击的格式。</span>
+            <div class="export-option-buttons">
+              <button id="exportFramesButton" class="ghost-button" type="button">Frames + JSON</button>
+              <button id="exportSpriteSheetButton" class="ghost-button" type="button">Sprite Sheet + JSON</button>
+              <button id="exportMovButton" class="ghost-button" type="button">透明 MOV</button>
+              <button id="exportGifButton" class="ghost-button" type="button">GIF</button>
+            </div>
           </div>
           <div id="exportResult" class="export-result" hidden></div>
         </section>

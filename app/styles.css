@@ -1299,6 +1299,28 @@ button:focus-visible,
   padding: 0 20px 20px;
 }
 
+.export-options {
+  margin: -6px 20px 20px;
+  padding: 14px;
+  border: 2px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+}
+
+.export-options > span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.export-option-buttons {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
 .magic-controls {
   display: flex;
   align-items: stretch;
@@ -1493,6 +1515,10 @@ button:focus-visible,
   .section-note,
   .step-lock-note {
     text-align: left;
+  }
+
+  .export-option-buttons {
+    grid-template-columns: 1fr;
   }
 
   .import-grid,

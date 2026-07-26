@@ -276,6 +276,11 @@ function bindElements() {
     "invertSelectionButton",
     "orderedSelectionInput",
     "exportButton",
+    "exportOptions",
+    "exportFramesButton",
+    "exportSpriteSheetButton",
+    "exportMovButton",
+    "exportGifButton",
     "magicUseRealesrganInput",
     "magicResizeHardInput",
     "magicResizeSoftInput",
@@ -334,7 +339,11 @@ function bindEvents() {
   els.semiTransparentToOpaqueButton.addEventListener("click", applySemiTransparentToOpaquePreview);
   els.savePreviewButton.addEventListener("click", downloadProcessPreviewResult);
   els.processButton.addEventListener("click", processVideo);
-  els.exportButton.addEventListener("click", exportFrames);
+  els.exportButton.addEventListener("click", toggleExportOptions);
+  els.exportFramesButton.addEventListener("click", () => exportSelectedFormat("frames", els.exportFramesButton));
+  els.exportSpriteSheetButton.addEventListener("click", () => exportSelectedFormat("sprite_sheet", els.exportSpriteSheetButton));
+  els.exportMovButton.addEventListener("click", () => exportSelectedFormat("mov", els.exportMovButton));
+  els.exportGifButton.addEventListener("click", () => exportSelectedFormat("gif", els.exportGifButton));
   els.magicButton.addEventListener("click", runMagicPreview);
   els.magicUseRealesrganInput.addEventListener("change", () => {
     setMagicUseRealesrgan(els.magicUseRealesrganInput.checked);
@@ -1612,6 +1621,9 @@ function syncResultActions() {
   const hasSelection = hasJob && state.selected.size > 0;
   els.openProcessedButton.disabled = !hasJob || !state.job?.processed_dir;
   els.exportButton.disabled = !hasSelection;
+  [els.exportFramesButton, els.exportSpriteSheetButton, els.exportMovButton, els.exportGifButton].forEach((button) => {
+    button.disabled = !hasSelection;
+  });
   els.magicButton.disabled = !hasSelection || state.magicInFlight;
   els.selectAllButton.disabled = !hasJob;
   els.selectNoneButton.disabled = !hasJob;
@@ -3166,7 +3178,7 @@ async function exportMagicFrames(variantKey = "half", button = els.exportMagicFr
   });
 }
 
-async function exportFrames() {
+function toggleExportOptions() {
   if (!state.job) {
     setStatus("\u8fd8\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u5904\u7406\u7ed3\u679c\u3002", "error");
     return;
@@ -3177,8 +3189,32 @@ async function exportFrames() {
     return;
   }
 
-  await withBusy(els.exportButton, async () => {
-    setStatus(state.preview.isReversed ? "\u6b63\u5728\u5012\u5e8f\u5bfc\u51fa\u9009\u4e2d\u5e27..." : "\u6b63\u5728\u5bfc\u51fa\u9009\u4e2d\u5e27...");
+  const shouldExpand = els.exportOptions.hidden;
+  els.exportOptions.hidden = !shouldExpand;
+  els.exportButton.setAttribute("aria-expanded", String(shouldExpand));
+  els.exportButton.textContent = shouldExpand ? "\u6536\u8D77\u5BFC\u51FA\u9009\u9879" : "\u5BFC\u51FA\u9009\u4E2D\u5E27";
+  if (shouldExpand) {
+    setStatus("\u8BF7\u9009\u62E9\u8981\u751F\u6210\u7684\u5BFC\u51FA\u683C\u5F0F\u3002");
+  }
+}
+
+async function exportSelectedFormat(exportFormat, button) {
+  if (!state.job || state.selected.size === 0) {
+    setStatus("\u81f3\u5c11\u9009\u4e00\u5e27\u518d\u5bfc\u51fa\u3002", "error");
+    syncResultActions();
+    return;
+  }
+
+  const labels = {
+    frames: "Frames + JSON",
+    sprite_sheet: "Sprite Sheet + JSON",
+    mov: "\u900F\u660E MOV",
+    gif: "GIF",
+  };
+  const label = labels[exportFormat] || exportFormat;
+  await withBusy(button, async () => {
+    const directionLabel = state.preview.isReversed ? "\u5012\u5E8F" : "";
+    setStatus(`\u6B63\u5728${directionLabel}\u5BFC\u51FA ${label}...`);
     const selectedFrames = getSelectedFrames();
     const data = await apiJson("/api/export", {
       method: "POST",
@@ -3186,11 +3222,12 @@ async function exportFrames() {
         job_id: state.job.job_id,
         selected_indices: selectedFrames.map((frame) => frame.index),
         video_duration_ms: Number(els.previewIntervalInput.value || 100),
+        export_format: exportFormat,
       },
     });
     state.exportResult = data.export;
     renderExportResult();
-    setStatus("\u5bfc\u51fa\u5b8c\u6210\uff0c\u7ed3\u679c\u5df2\u5199\u5165\u672c\u5730\u5bfc\u51fa\u76ee\u5f55\u3002", "success");
+    setStatus(`${label} \u5BFC\u51FA\u5B8C\u6210\uFF0C\u5DF2\u5199\u5165\u672C\u5730\u5BFC\u51FA\u76EE\u5F55\u3002`, "success");
   });
 }
 
@@ -3202,13 +3239,27 @@ function renderExportResult() {
   }
 
   els.exportResult.hidden = false;
-  const mediaLinks = [
+  const fileLinks = [
+    ["Frames JSON", state.exportResult.frames_json_url, state.exportResult.frames_json_name],
+    ["Sprite Sheet", state.exportResult.sheet_url, state.exportResult.sheet_name],
+    ["Sprite Sheet JSON", state.exportResult.sheet_json_url, state.exportResult.sheet_json_name],
     ["MOV", state.exportResult.mov_url || state.exportResult.video_url, state.exportResult.mov_name || state.exportResult.video_name],
     ["GIF", state.exportResult.gif_url, state.exportResult.gif_name],
   ]
     .filter(([, url]) => Boolean(url))
     .map(([label, url, name]) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${label}: ${escapeHtml(name || url)}</a>`)
     .join("");
+  const exportedContents = [
+    state.exportResult.frames_dir ? "Frames + JSON" : "",
+    state.exportResult.sheet_dir ? "Sprite Sheet + JSON" : "",
+    state.exportResult.mov_url || state.exportResult.video_url ? "\u900F\u660E MOV" : "",
+    state.exportResult.gif_url ? "GIF" : "",
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  const framesButton = state.exportResult.frames_dir
+    ? `<button id="openFramesDirButton" class="ghost-button" type="button">\u6253\u5f00 Frames + JSON</button>`
+    : "";
   const sheetButton = state.exportResult.sheet_dir
     ? `<button id="openSheetDirButton" class="ghost-button" type="button">\u6253\u5F00 Sprite Sheet + JSON</button>`
     : "";
@@ -3216,12 +3267,12 @@ function renderExportResult() {
   els.exportResult.innerHTML = `
     <div class="result-summary">
       ${summaryCard("\u5bfc\u51fa\u5e27\u6570", `${state.exportResult.frame_count} \u5e27`)}
-      ${summaryCard("\u5bfc\u51fa\u5185\u5bb9", "frames \u6587\u4ef6\u5939 / \u900f\u660e MOV / GIF / Sprite Sheet + JSON")}
+      ${summaryCard("\u5bfc\u51fa\u5185\u5bb9", escapeHtml(exportedContents || "\u5DF2\u5BFC\u51FA"))}
     </div>
     <div class="link-list">
-      <button id="openFramesDirButton" class="ghost-button" type="button">\u6253\u5f00 frames \u6587\u4ef6\u5939</button>
+      ${framesButton}
       ${sheetButton}
-      ${mediaLinks}
+      ${fileLinks}
     </div>
   `;
 

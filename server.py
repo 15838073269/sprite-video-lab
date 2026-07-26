@@ -4285,14 +4285,17 @@ def export_magic_frames(
     return result
 
 
-def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int) -> dict:
+def normalize_export_format(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in {"frames", "sprite_sheet", "mov", "gif"}:
+        raise ValueError(f"unsupported export format: {value}")
+    return normalized
+
+
+def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int, export_format: str) -> dict:
+    export_format = normalize_export_format(export_format)
     manifest = load_job_manifest(job_id)
     processed_dir = job_dir(job_id) / "processed"
-    target_dir = configured_exports_dir() / f"{timestamped_id()}-export"
-    frames_dir = target_dir / "frames"
-    sheet_dir = target_dir / "sprite-sheet"
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    sheet_dir.mkdir(parents=True, exist_ok=True)
 
     frame_map = {entry["index"]: entry for entry in manifest["frames"]}
     seen_indices: set[int] = set()
@@ -4304,34 +4307,99 @@ def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int)
     if not indices:
         raise ValueError("no frames selected for export")
 
-    copied_paths: list[Path] = []
-    for output_index, frame_index in enumerate(indices, start=1):
-        entry = frame_map[frame_index]
-        source_path = processed_dir / entry["name"]
-        target_path = frames_dir / f"frame_{output_index:03d}.png"
-        shutil.copy2(source_path, target_path)
-        copied_paths.append(target_path)
+    video_duration_ms = clamp_int(video_duration_ms, 20, 5000)
+    target_dir = configured_exports_dir() / f"{timestamped_id()}-export"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    selected_entries = [frame_map[index] for index in indices]
+    source_paths = [processed_dir / entry["name"] for entry in selected_entries]
+    result = {
+        "export_format": export_format,
+        "output_dir": str(target_dir),
+        "frame_count": len(source_paths),
+        "frame_duration_ms": video_duration_ms,
+        "video_duration_ms": video_duration_ms,
+    }
+
+    if export_format == "frames":
+        frames_dir = target_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        frame_metadata = []
+        for output_index, (frame_index, source_path) in enumerate(
+            zip(indices, source_paths),
+            start=1,
+        ):
+            target_path = frames_dir / f"frame_{output_index:03d}.png"
+            shutil.copy2(source_path, target_path)
+            frame_metadata.append(
+                {
+                    "index": output_index - 1,
+                    "source_index": frame_index,
+                    "file": target_path.name,
+                    "duration_ms": video_duration_ms,
+                }
+            )
+        frames_json_name = "frames.json"
+        frames_metadata = {
+            "format": "frame-sequence",
+            "frame_count": len(frame_metadata),
+            "frame_duration_ms": video_duration_ms,
+            "total_duration_ms": len(frame_metadata) * video_duration_ms,
+            "frames": frame_metadata,
+        }
+        (frames_dir / frames_json_name).write_text(
+            json.dumps(frames_metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        result.update(
+            {
+                "frames_dir": str(frames_dir),
+                "frames_json_name": frames_json_name,
+                "frames_json_url": export_url(target_dir, f"frames/{frames_json_name}"),
+            }
+        )
+        return result
 
     cell_width = 0
     cell_height = 0
     frame_sizes: list[tuple[int, int]] = []
-    for frame_path in copied_paths:
+    for frame_path in source_paths:
         frame = open_rgba_image(frame_path)
         frame_sizes.append(frame.size)
         cell_width = max(cell_width, frame.size[0])
         cell_height = max(cell_height, frame.size[1])
         frame.close()
 
-    video_duration_ms = clamp_int(video_duration_ms, 20, 5000)
     timestamp = f"{datetime.now():%Y%m%d-%H%M%S}"
-    mov_name = f"animation-{timestamp}.mov"
-    gif_name = f"animation-{timestamp}.gif"
+    if export_format == "mov":
+        mov_name = f"animation-{timestamp}.mov"
+        save_alpha_mov(source_paths, frame_sizes, target_dir / mov_name, cell_width, cell_height, video_duration_ms)
+        result.update(
+            {
+                "video_name": mov_name,
+                "video_url": export_url(target_dir, mov_name),
+                "mov_name": mov_name,
+                "mov_url": export_url(target_dir, mov_name),
+            }
+        )
+        return result
+
+    if export_format == "gif":
+        gif_name = f"animation-{timestamp}.gif"
+        save_gif(source_paths, frame_sizes, target_dir / gif_name, cell_width, cell_height, video_duration_ms)
+        result.update(
+            {
+                "gif_name": gif_name,
+                "gif_url": export_url(target_dir, gif_name),
+            }
+        )
+        return result
+
+    sheet_dir = target_dir / "sprite-sheet"
+    sheet_dir.mkdir(parents=True, exist_ok=True)
     sheet_name = "sheet.png"
     sheet_json_name = "sheet.json"
-    save_alpha_mov(copied_paths, frame_sizes, target_dir / mov_name, cell_width, cell_height, video_duration_ms)
-    save_gif(copied_paths, frame_sizes, target_dir / gif_name, cell_width, cell_height, video_duration_ms)
     sheet_metadata = save_sprite_sheet(
-        copied_paths,
+        source_paths,
         frame_sizes,
         sheet_dir / sheet_name,
         sheet_dir / sheet_json_name,
@@ -4339,28 +4407,20 @@ def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int)
         cell_height,
         video_duration_ms,
     )
-
-    return {
-        "output_dir": str(target_dir),
-        "frames_dir": str(frames_dir),
-        "sheet_dir": str(sheet_dir),
-        "video_name": mov_name,
-        "video_url": export_url(target_dir, mov_name),
-        "mov_name": mov_name,
-        "mov_url": export_url(target_dir, mov_name),
-        "gif_name": gif_name,
-        "gif_url": export_url(target_dir, gif_name),
-        "sheet_name": sheet_name,
-        "sheet_url": export_url(target_dir, f"sprite-sheet/{sheet_name}"),
-        "sheet_json_name": sheet_json_name,
-        "sheet_json_url": export_url(target_dir, f"sprite-sheet/{sheet_json_name}"),
-        "sheet_columns": sheet_metadata["columns"],
-        "sheet_rows": sheet_metadata["rows"],
-        "sheet_width": sheet_metadata["width"],
-        "sheet_height": sheet_metadata["height"],
-        "frame_count": len(copied_paths),
-        "video_duration_ms": video_duration_ms,
-    }
+    result.update(
+        {
+            "sheet_dir": str(sheet_dir),
+            "sheet_name": sheet_name,
+            "sheet_url": export_url(target_dir, f"sprite-sheet/{sheet_name}"),
+            "sheet_json_name": sheet_json_name,
+            "sheet_json_url": export_url(target_dir, f"sprite-sheet/{sheet_json_name}"),
+            "sheet_columns": sheet_metadata["columns"],
+            "sheet_rows": sheet_metadata["rows"],
+            "sheet_width": sheet_metadata["width"],
+            "sheet_height": sheet_metadata["height"],
+        }
+    )
+    return result
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -4601,6 +4661,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     job_id=str(payload.get("job_id") or ""),
                     selected_indices=[safe_int(value, -1) for value in (payload.get("selected_indices") or [])],
                     video_duration_ms=safe_int(payload.get("video_duration_ms"), 100),
+                    export_format=str(payload.get("export_format") or ""),
                 )
                 self.send_json({"ok": True, "export": result})
                 return
