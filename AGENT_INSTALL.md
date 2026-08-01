@@ -54,7 +54,7 @@ The app also checks its built-in fallback path used by the maintainer machine, b
 
 ## 4. Optional AI Matting Runtime
 
-Install this only when the user needs BiRefNet, Luma combinations, or CorridorKey:
+Install this manually only when the user explicitly asks for AI setup. The WebApp otherwise waits until the user selects BiRefNet or CorridorKey and confirms the in-app installation prompt:
 
 ```powershell
 .\setup_ai_runtime.bat

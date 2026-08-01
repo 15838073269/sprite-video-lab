@@ -10,6 +10,85 @@ import server
 
 
 class AiMatteSizingTests(unittest.TestCase):
+    def test_ai_model_install_requires_explicit_confirmation(self):
+        with mock.patch.object(server, "require_ai_runtime_for_components") as require_runtime:
+            with self.assertRaisesRegex(ValueError, "确认"):
+                server.install_ai_models_for_matte_mode(False, "birefnet")
+
+        require_runtime.assert_not_called()
+
+    def test_ai_model_install_only_installs_components_for_selected_mode(self):
+        completed_status = {"installed": True}
+        with (
+            mock.patch.object(server, "require_ai_runtime_for_components") as require_runtime,
+            mock.patch.object(server, "download_birefnet_model") as download_birefnet,
+            mock.patch.object(server, "download_corridorkey_checkpoint") as download_corridorkey,
+            mock.patch.object(server, "ai_model_install_status", return_value=completed_status),
+        ):
+            result = server.install_ai_models_for_matte_mode(
+                True,
+                "birefnet_corridorkey",
+                "birefnet-hr-matting",
+            )
+
+        require_runtime.assert_called_once_with(["birefnet", "corridorkey"])
+        self.assertEqual(
+            download_birefnet.call_args_list,
+            [
+                mock.call("birefnet-hr-matting"),
+                mock.call("birefnet-general"),
+            ],
+        )
+        self.assertEqual(
+            download_corridorkey.call_args_list,
+            [
+                mock.call("green"),
+                mock.call("blue"),
+            ],
+        )
+        self.assertEqual(
+            result["installed_models"],
+            ["birefnet-hr-matting", "birefnet-general", "corridorkey-green", "corridorkey-blue"],
+        )
+
+    def test_non_ai_matte_mode_never_starts_installation(self):
+        with mock.patch.object(server, "require_ai_runtime_for_components") as require_runtime:
+            with self.assertRaisesRegex(ValueError, "不需要"):
+                server.install_ai_models_for_matte_mode(True, "chroma")
+
+        require_runtime.assert_not_called()
+
+    def test_birefnet_processing_uses_cached_files_only(self):
+        captured = {}
+
+        class FakeModel:
+            def to(self, _device):
+                return self
+
+            def eval(self):
+                return self
+
+        class FakeAutoModel:
+            @staticmethod
+            def from_pretrained(_repo_id, **kwargs):
+                captured.update(kwargs)
+                return FakeModel()
+
+        fake_torch = mock.Mock()
+        fake_torch.cuda.is_available.return_value = False
+        with (
+            mock.patch.object(server, "_BIREFNET_MODEL_CACHE", {}),
+            mock.patch.object(
+                server,
+                "import_ai_matte_dependencies",
+                return_value=(fake_torch, mock.Mock(), FakeAutoModel),
+            ),
+            mock.patch.object(server, "configure_ai_model_cache", return_value=Path("model-cache")),
+        ):
+            server.load_birefnet_model("birefnet-hr-matting", "cpu")
+
+        self.assertTrue(captured["local_files_only"])
+
     def test_clear_runtime_files_requires_confirmation_and_stays_inside_managed_dirs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             work_dir = Path(temp_dir) / "work"

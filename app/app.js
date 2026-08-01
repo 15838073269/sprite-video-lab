@@ -101,6 +101,8 @@ let hotReloadVersion = null;
 let hotReloadTimerId = null;
 let uploadDragDepth = 0;
 let skipSessionPersistence = false;
+let lastAcceptedMatteMode = "chroma";
+let aiModelInstallPromise = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -119,6 +121,7 @@ document.addEventListener("DOMContentLoaded", () => {
   void loadOutputPath();
   restoreSessionFromStorage();
   enforceAutomaticAiSettings(false);
+  lastAcceptedMatteMode = els.matteModeInput.value || "chroma";
   startHotReloadPolling();
   window.addEventListener("beforeunload", persistSession);
 });
@@ -393,7 +396,7 @@ function bindEvents() {
   els.videoPreview.addEventListener("ended", () => restartSegmentPlayback({ autoplay: true }));
 
   els.manualKeyInput.addEventListener("input", syncManualColorLabel);
-  els.matteModeInput.addEventListener("change", updateChromaVisibility);
+  els.matteModeInput.addEventListener("change", handleMatteModeChange);
   els.keyModeInput.addEventListener("change", updateChromaVisibility);
   els.chromaEnabledInput.addEventListener("change", updateChromaVisibility);
   els.corridorEnabledInput.addEventListener("change", updateChromaVisibility);
@@ -787,6 +790,84 @@ function matteModeUsesLuma(mode) {
 
 function matteModeUsesChromaSeed(mode) {
   return mode === "chroma" || mode === "corridorkey";
+}
+
+function matteModeRequiresAiModel(mode) {
+  return matteModeUsesBiRefNet(mode) || matteModeUsesCorridorKey(mode);
+}
+
+function aiModelRequestPayload(mode) {
+  return {
+    matte_mode: mode,
+    ai_model: els.aiModelInput.value,
+    ai_device: els.aiDeviceInput.value,
+  };
+}
+
+async function ensureAiModelsReady(mode) {
+  if (!matteModeRequiresAiModel(mode)) {
+    return true;
+  }
+  if (aiModelInstallPromise) {
+    return aiModelInstallPromise;
+  }
+
+  aiModelInstallPromise = (async () => {
+    const payload = aiModelRequestPayload(mode);
+    try {
+      const statusData = await apiJson("/api/ai-model-status", {
+        method: "POST",
+        body: payload,
+      });
+      if (statusData.status?.installed) {
+        return true;
+      }
+
+      const confirmed = window.confirm(
+        "\u8BE5\u62A0\u56FE\u65B9\u6CD5\u9700\u8981\u4E0B\u8F7D\u5E76\u5B89\u88C5 AI \u6A21\u578B\uFF0C\u6587\u4EF6\u8F83\u5927\u4E14\u9700\u8981\u8054\u7F51\u3002\u786E\u8BA4\u73B0\u5728\u5B89\u88C5\u5417\uFF1F"
+      );
+      if (!confirmed) {
+        setStatus("\u5DF2\u53D6\u6D88 AI \u6A21\u578B\u5B89\u88C5\uFF0C\u672A\u4E0B\u8F7D\u4EFB\u4F55\u6A21\u578B\u6587\u4EF6\u3002", "error");
+        return false;
+      }
+
+      setStatus("\u6B63\u5728\u5B89\u88C5 AI \u6A21\u578B\uFF0C\u9996\u6B21\u4E0B\u8F7D\u53EF\u80FD\u9700\u8981\u51E0\u5206\u949F\uFF0C\u8BF7\u52FF\u5173\u95ED\u9875\u9762\u3002");
+      const installData = await apiJson("/api/install-ai-model", {
+        method: "POST",
+        body: { ...payload, confirmed: true },
+      });
+      if (!installData.result?.status?.installed) {
+        throw new Error("AI \u6A21\u578B\u5B89\u88C5\u672A\u5B8C\u6210\uFF0C\u8BF7\u91CD\u8BD5\u3002");
+      }
+      setStatus("AI \u6A21\u578B\u5B89\u88C5\u5B8C\u6210\uFF0C\u53EF\u4EE5\u5F00\u59CB\u9884\u89C8\u6216\u5904\u7406\u3002", "success");
+      return true;
+    } catch (error) {
+      setStatus(`AI \u6A21\u578B\u5B89\u88C5\u5931\u8D25\uFF1A${error.message || String(error)}`, "error");
+      return false;
+    }
+  })();
+
+  try {
+    return await aiModelInstallPromise;
+  } finally {
+    aiModelInstallPromise = null;
+  }
+}
+
+async function handleMatteModeChange() {
+  const selectedMode = els.matteModeInput.value || "chroma";
+  updateChromaVisibility();
+  els.matteModeInput.disabled = true;
+  const ready = await ensureAiModelsReady(selectedMode);
+  if (ready) {
+    lastAcceptedMatteMode = selectedMode;
+    persistSession();
+  } else {
+    els.matteModeInput.value = lastAcceptedMatteMode;
+    updateChromaVisibility();
+    persistSession();
+  }
+  els.matteModeInput.disabled = !els.chromaEnabledInput.checked;
 }
 
 function currentUsesCorridorKey() {
@@ -2028,11 +2109,14 @@ async function processVideo() {
     return;
   }
 
+  const matteMode = currentMatteMode();
+  if (!(await ensureAiModelsReady(matteMode))) {
+    return;
+  }
   const payload = collectProcessingPayload();
 
   await withBusy(els.processButton, async () => {
     stopPreviewTimer();
-    const matteMode = currentMatteMode();
     const matteLabel = formatMatteModeLabel(matteMode);
     setStatus(
       matteMode !== "none"
@@ -2068,6 +2152,10 @@ async function previewCurrentFrame() {
     return;
   }
 
+  const matteMode = currentMatteMode();
+  if (!(await ensureAiModelsReady(matteMode))) {
+    return;
+  }
   const duration = Number(currentUploadInfo().duration || 0);
   const sampleFrame = isImageSequenceUpload() ? clampSegmentFrame(state.segment.startFrame) : 1;
   const rawCurrentTime = isImageUpload() || isImageSequenceUpload() ? 0 : Number(els.videoPreview.currentTime || state.segment.start || 0);
@@ -2083,7 +2171,6 @@ async function previewCurrentFrame() {
   };
 
   await withBusy(els.previewFrameButton, async () => {
-    const matteMode = currentMatteMode();
     const matteLabel = formatMatteModeLabel(matteMode);
     setStatus(
       matteMode !== "none"

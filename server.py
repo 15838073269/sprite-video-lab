@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import cgi
+import importlib.util
 import json
 import math
 import mimetypes
@@ -120,6 +121,20 @@ AI_MATTE_MODES = {
     "birefnet_luma_key",
     "birefnet_luma_corridorkey",
 }
+BIREFNET_MATTE_MODES = {
+    "birefnet",
+    "birefnet_corridorkey",
+    "birefnet_corridorkey_key",
+    "birefnet_luma",
+    "birefnet_luma_key",
+    "birefnet_luma_corridorkey",
+}
+CORRIDORKEY_MATTE_MODES = {
+    "corridorkey",
+    "birefnet_corridorkey",
+    "birefnet_corridorkey_key",
+    "birefnet_luma_corridorkey",
+}
 AI_MATTE_DEVICE_ALIASES = {
     "": "auto",
     "auto": "auto",
@@ -160,6 +175,7 @@ MAGIC_RESIZE_MODES = {
 _FFMPEG_HWACCELS_CACHE: set[str] | None = None
 _BIREFNET_MODEL_CACHE: dict[tuple[str, str], object] = {}
 _CORRIDORKEY_ENGINE_CACHE: dict[tuple[str, str], object] = {}
+_AI_INSTALL_LOCK = threading.Lock()
 
 
 def ensure_runtime_dirs() -> None:
@@ -387,6 +403,127 @@ def configure_ai_model_cache() -> Path:
     os.environ.setdefault("HF_XET_CACHE", str(cache_dir / "xet"))
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     return cache_dir
+
+
+def ai_components_for_matte_mode(matte_mode: str) -> list[str]:
+    mode = str(matte_mode or "").strip().lower()
+    components = []
+    if mode in BIREFNET_MATTE_MODES:
+        components.append("birefnet")
+    if mode in CORRIDORKEY_MATTE_MODES:
+        components.append("corridorkey")
+    return components
+
+
+def huggingface_repo_is_cached(repo_id: str) -> bool:
+    repo_dir = default_ai_model_cache_dir() / f"models--{repo_id.replace('/', '--')}"
+    snapshots_dir = repo_dir / "snapshots"
+    return snapshots_dir.is_dir() and any(path.is_file() for path in snapshots_dir.rglob("*"))
+
+
+def corridorkey_checkpoint_is_cached(screen_color: str) -> bool:
+    checkpoint_dir = default_corridorkey_root() / "CorridorKeyModule" / "checkpoints"
+    color = "blue" if screen_color == "blue" else "green"
+    names = (
+        ("CorridorKeyBlue_1.0.safetensors", "CorridorKeyBlue_1.0.pth")
+        if color == "blue"
+        else ("CorridorKey_v1.0.safetensors", "CorridorKey_v1.0.pth")
+    )
+    return any((checkpoint_dir / name).is_file() and (checkpoint_dir / name).stat().st_size > 0 for name in names)
+
+
+def missing_ai_dependency_names() -> list[str]:
+    required = ("torch", "torchvision", "transformers", "huggingface_hub", "safetensors", "numpy", "cv2")
+    return [name for name in required if importlib.util.find_spec(name) is None]
+
+
+def ai_model_install_status(matte_mode: str, model_key: str = DEFAULT_AI_MATTE_MODEL) -> dict:
+    components = ai_components_for_matte_mode(matte_mode)
+    normalized_model_key = normalize_ai_model_key(model_key)
+    dependencies_missing = missing_ai_dependency_names() if components else []
+    models = {}
+    if "birefnet" in components:
+        requested_repo = AI_MATTE_MODEL_REPOS[normalized_model_key]
+        fallback_repo = AI_MATTE_MODEL_REPOS["birefnet-general"]
+        models[normalized_model_key] = huggingface_repo_is_cached(requested_repo)
+        models["birefnet-general"] = huggingface_repo_is_cached(fallback_repo)
+    if "corridorkey" in components:
+        source_ready = (default_corridorkey_root() / "CorridorKeyModule").is_dir()
+        models["corridorkey-source"] = source_ready
+        models["corridorkey-green"] = corridorkey_checkpoint_is_cached("green")
+        models["corridorkey-blue"] = corridorkey_checkpoint_is_cached("blue")
+    return {
+        "required": bool(components),
+        "installed": bool(components) and not dependencies_missing and all(models.values()),
+        "components": components,
+        "models": models,
+        "missing_dependencies": dependencies_missing,
+        "model_cache": str(default_ai_model_cache_dir()),
+        "corridorkey_root": str(default_corridorkey_root()),
+    }
+
+
+def download_birefnet_model(model_key: str) -> str:
+    normalized_model_key = normalize_ai_model_key(model_key)
+    repo_id = AI_MATTE_MODEL_REPOS[normalized_model_key]
+    cache_dir = configure_ai_model_cache()
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(repo_id=repo_id, cache_dir=str(cache_dir))
+    return normalized_model_key
+
+
+def download_corridorkey_checkpoint(screen_color: str) -> str:
+    _np, _torch_module, corridor_backend, _root = import_corridorkey_dependencies()
+    ensure_checkpoint = getattr(corridor_backend, "_ensure_torch_checkpoint", None)
+    if not callable(ensure_checkpoint):
+        raise RuntimeError("CorridorKey does not expose its checkpoint downloader")
+    color = "blue" if screen_color == "blue" else "green"
+    ensure_checkpoint(color)
+    return color
+
+
+def require_ai_runtime_for_components(components: list[str]) -> None:
+    missing = missing_ai_dependency_names()
+    if missing:
+        raise RuntimeError(
+            f"AI 运行环境缺少 {', '.join(missing)}。请先运行 setup_ai_runtime.bat，或使用完整便携版。"
+        )
+    if "corridorkey" in components and not (default_corridorkey_root() / "CorridorKeyModule").is_dir():
+        raise RuntimeError("CorridorKey 支持文件尚未安装。请先运行 setup_ai_runtime.bat，或使用完整便携版。")
+
+
+def install_ai_models_for_matte_mode(
+    confirmed: bool,
+    matte_mode: str,
+    model_key: str = DEFAULT_AI_MATTE_MODEL,
+) -> dict:
+    if confirmed is not True:
+        raise ValueError("必须确认后才能安装 AI 模型。")
+    components = ai_components_for_matte_mode(matte_mode)
+    if not components:
+        raise ValueError("当前抠图方法不需要安装 AI 模型。")
+
+    with _AI_INSTALL_LOCK:
+        require_ai_runtime_for_components(components)
+        installed = []
+        if "birefnet" in components:
+            normalized_model_key = normalize_ai_model_key(model_key)
+            keys = [normalized_model_key]
+            if normalized_model_key != "birefnet-general":
+                keys.append("birefnet-general")
+            for key in keys:
+                download_birefnet_model(key)
+                installed.append(key)
+        if "corridorkey" in components:
+            for screen_color in ("green", "blue"):
+                download_corridorkey_checkpoint(screen_color)
+                installed.append(f"corridorkey-{screen_color}")
+
+        status = ai_model_install_status(matte_mode, model_key)
+        if not status["installed"]:
+            raise RuntimeError("AI 模型安装未完成，请检查网络和磁盘空间后重试。")
+        return {"installed_models": installed, "status": status}
 
 
 def clean_filename(name: str) -> str:
@@ -1561,7 +1698,12 @@ def load_birefnet_model(model_key: str, requested_device: str):
             pass
 
     cache_dir = configure_ai_model_cache()
-    model = auto_model.from_pretrained(repo_id, trust_remote_code=True, cache_dir=str(cache_dir))
+    model = auto_model.from_pretrained(
+        repo_id,
+        trust_remote_code=True,
+        cache_dir=str(cache_dir),
+        local_files_only=True,
+    )
     model.to(device)
     model.eval()
     _BIREFNET_MODEL_CACHE[cache_key] = model
@@ -1650,6 +1792,8 @@ def patch_corridorkey_gpu_despeckle(corridor_inference, torch_module) -> None:
 
 
 def load_corridorkey_engine(requested_device: str, screen_color: str):
+    if not corridorkey_checkpoint_is_cached(screen_color):
+        raise RuntimeError("CorridorKey 模型尚未安装，请重新选择该抠图方法并确认安装。")
     _np, torch_module, corridor_backend, root = import_corridorkey_dependencies()
     device = resolve_ai_runtime_device(torch_module, requested_device)
     cache_key = (device, screen_color)
@@ -4481,6 +4625,23 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/api/ai-model-status":
+                payload = self.read_json_body()
+                status = ai_model_install_status(
+                    str(payload.get("matte_mode") or ""),
+                    str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL),
+                )
+                self.send_json({"ok": True, "status": status})
+                return
+            if parsed.path == "/api/install-ai-model":
+                payload = self.read_json_body()
+                result = install_ai_models_for_matte_mode(
+                    confirmed=payload.get("confirmed") is True,
+                    matte_mode=str(payload.get("matte_mode") or ""),
+                    model_key=str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL),
+                )
+                self.send_json({"ok": True, "result": result})
+                return
             if parsed.path == "/api/clear-runtime-files":
                 payload = self.read_json_body()
                 result = clear_managed_runtime_files(payload.get("confirmed") is True)

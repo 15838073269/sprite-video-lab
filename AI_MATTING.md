@@ -15,7 +15,7 @@ The app keeps the chroma-key workflow. AI matting is only used when you select i
 
 ## Model Cache
 
-AI models are downloaded by the local runtime when selected for the first time. The cache location is controlled by:
+AI model weights are not bundled with the portable app. Chroma key, Luma-only, and no-matte workflows do not download them. When a BiRefNet or CorridorKey method is selected for the first time, the page asks for confirmation and only downloads the required models after the user accepts. The cache location is controlled by:
 
 ```bat
 set SPRITE_VIDEO_LAB_AI_MODEL_CACHE=<model-cache-dir>
