@@ -22,6 +22,7 @@ const state = {
   magicInFlight: false,
   magicResizeMode: "hard",
   magicUseRealesrgan: true,
+  magicVariantKeys: new Set(["half"]),
   processPreviewZoom: {
     source: 100,
     processed: 100,
@@ -49,13 +50,23 @@ const AI_RESOLUTION_DEFAULT = 1024;
 const AI_RESOLUTION_AUTO = "auto";
 const AI_MODEL_AUTO = "birefnet-hr-matting";
 const AI_DEVICE_AUTO = "auto";
-const OUTPUT_SCALE_MIN_PERCENT = 5;
-const OUTPUT_SCALE_MAX_PERCENT = 200;
-const OUTPUT_SCALE_DEFAULT_PERCENT = 100;
 const MAGIC_VARIANT_CONFIGS = [
   {
+    key: "full",
+    label: "100%",
+    panelId: "magicFullPreviewPanel",
+    canvasId: "magicFullPreviewCanvas",
+    emptyId: "magicFullPreviewEmptyState",
+    frameLabelId: "magicFullPreviewFrameLabel",
+    countId: "magicFullPreviewSelectedCount",
+    progressFillId: "magicFullPreviewProgressFill",
+    progressLabelId: "magicFullPreviewProgressLabel",
+    sizeLabelId: "magicFullOutputSizeLabel",
+    exportButtonId: "exportMagicFullFramesButton",
+  },
+  {
     key: "half",
-    label: "MAGIC 1/2",
+    label: "1/2",
     panelId: "magicPreviewPanel",
     canvasId: "magicPreviewCanvas",
     emptyId: "magicPreviewEmptyState",
@@ -68,7 +79,7 @@ const MAGIC_VARIANT_CONFIGS = [
   },
   {
     key: "quarter",
-    label: "MAGIC 1/4",
+    label: "1/4",
     panelId: "magicQuarterPreviewPanel",
     canvasId: "magicQuarterPreviewCanvas",
     emptyId: "magicQuarterPreviewEmptyState",
@@ -81,7 +92,7 @@ const MAGIC_VARIANT_CONFIGS = [
   },
   {
     key: "eighth",
-    label: "MAGIC 1/8",
+    label: "1/8",
     panelId: "magicEighthPreviewPanel",
     canvasId: "magicEighthPreviewCanvas",
     emptyId: "magicEighthPreviewEmptyState",
@@ -103,6 +114,8 @@ let uploadDragDepth = 0;
 let skipSessionPersistence = false;
 let lastAcceptedMatteMode = "chroma";
 let aiModelInstallPromise = null;
+let realesrganInstallPromise = null;
+let preprocessSmoothingInstalling = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -120,6 +133,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setStatus("\u7B49\u5F85\u5BFC\u5165\u7D20\u6750\u3002");
   void loadOutputPath();
   restoreSessionFromStorage();
+  void validateRestoredPreprocessSmoothing();
   enforceAutomaticAiSettings(false);
   lastAcceptedMatteMode = els.matteModeInput.value || "chroma";
   startHotReloadPolling();
@@ -161,10 +175,6 @@ function bindElements() {
     "segmentConfirmStatus",
     "segmentConfirmHint",
     "keepEveryInput",
-    "outputScaleInput",
-    "canvasModeInput",
-    "reducePxInput",
-    "chromaEnabledInput",
     "matteModeInput",
     "keyModeInput",
     "manualColorField",
@@ -184,13 +194,14 @@ function bindElements() {
     "lumaGammaInput",
     "lumaStrengthInput",
     "lumaPolarityInput",
-    "batchGreenToBlackInput",
-    "batchGreenDesaturateInput",
+    "batchBackgroundToBlackInput",
+    "batchBackgroundDesaturateInput",
     "batchSemiTransparentToBlackInput",
     "batchSemiTransparentToOpaqueInput",
+    "preprocessEsrSmoothingInput",
     "previewFrameButton",
-    "greenToBlackButton",
-    "greenDesaturateButton",
+    "backgroundToBlackButton",
+    "backgroundDesaturateButton",
     "semiTransparentToBlackButton",
     "semiTransparentToOpaqueButton",
     "savePreviewButton",
@@ -243,6 +254,20 @@ function bindElements() {
     "previewBackgroundInput",
     "previewBackgroundLabel",
     "previewIntervalInput",
+    "comparisonTitle",
+    "scaleResultsState",
+    "animationComparisonStrip",
+    "originalVariantExportButton",
+    "originalVariantExportOptions",
+    "magicFullPreviewPanel",
+    "magicFullPreviewCanvas",
+    "magicFullPreviewEmptyState",
+    "magicFullPreviewFrameLabel",
+    "magicFullPreviewSelectedCount",
+    "magicFullPreviewProgressFill",
+    "magicFullPreviewProgressLabel",
+    "magicFullOutputSizeLabel",
+    "exportMagicFullFramesButton",
     "magicPreviewPanel",
     "magicPreviewCanvas",
     "magicPreviewEmptyState",
@@ -286,9 +311,14 @@ function bindElements() {
     "exportSpriteSheetButton",
     "exportMovButton",
     "exportGifButton",
-    "magicUseRealesrganInput",
-    "magicResizeHardInput",
-    "magicResizeSoftInput",
+    "scaleProcessToggleButton",
+    "scaleProcessingControls",
+    "scaleVariantButtons",
+    "magicUseRealesrganButton",
+    "magicResizeHardButton",
+    "magicResizeSoftButton",
+    "scaleModeExplanation",
+    "scaleProcessingHint",
     "magicButton",
     "exportResult",
     "appStatus",
@@ -305,18 +335,42 @@ function magicResizeModeLabel(mode = state.magicResizeMode) {
   return MAGIC_RESIZE_MODE_LABELS[normalizeMagicResizeMode(mode)];
 }
 
+function setChoiceButtonState(button, selected) {
+  if (!button) return;
+  button.classList.toggle("is-selected", selected);
+  button.setAttribute("aria-pressed", String(selected));
+}
+
+function markScaleResultsStale(message = "帧或参数已变化，点击“更新缩放处理”只补算差异。") {
+  if (!state.magicPreview) return;
+  state.magicPreview.stale = true;
+  MAGIC_VARIANT_CONFIGS.forEach((config) => {
+    const ui = magicVariantElements(config);
+    if (ui.exportButton) ui.exportButton.disabled = true;
+    const options = els.animationComparisonStrip?.querySelector(`[data-variant-export-options="${config.key}"]`);
+    if (options) options.hidden = true;
+  });
+  if (els.scaleResultsState) {
+    els.scaleResultsState.textContent = message;
+  }
+  if (els.magicButton) {
+    els.magicButton.textContent = "更新缩放处理";
+  }
+}
+
 function setMagicResizeMode(mode, { clearExisting = true } = {}) {
   const normalized = normalizeMagicResizeMode(mode);
   const changed = state.magicResizeMode !== normalized;
   state.magicResizeMode = normalized;
-  if (els.magicResizeHardInput) {
-    els.magicResizeHardInput.checked = normalized === "hard";
-  }
-  if (els.magicResizeSoftInput) {
-    els.magicResizeSoftInput.checked = normalized === "soft";
+  setChoiceButtonState(els.magicResizeHardButton, normalized === "hard");
+  setChoiceButtonState(els.magicResizeSoftButton, normalized === "soft");
+  if (els.scaleModeExplanation) {
+    els.scaleModeExplanation.textContent = normalized === "hard"
+      ? "硬：最近邻缩小，像素边缘更利落；适合像素风和清晰硬边。"
+      : "软：BOX 缩小，边缘更平滑、抗锯齿更明显；适合柔和插画和非像素素材。";
   }
   if (changed && clearExisting) {
-    clearMagicPreview();
+    markScaleResultsStale();
   }
 }
 
@@ -324,11 +378,76 @@ function setMagicUseRealesrgan(enabled, { clearExisting = true } = {}) {
   const next = Boolean(enabled);
   const changed = state.magicUseRealesrgan !== next;
   state.magicUseRealesrgan = next;
-  if (els.magicUseRealesrganInput) {
-    els.magicUseRealesrganInput.checked = next;
+  setChoiceButtonState(els.magicUseRealesrganButton, next);
+  const fullButton = els.scaleVariantButtons?.querySelector('[data-scale-variant="full"]');
+  if (fullButton) {
+    fullButton.disabled = !next;
+    fullButton.title = next ? "ESR ×4 后缩回原尺寸" : "100% 必须启用 Real-ESRGAN";
+  }
+  if (!next && state.magicVariantKeys.has("full")) {
+    state.magicVariantKeys.delete("full");
+    if (state.magicVariantKeys.size === 0) state.magicVariantKeys.add("half");
+    syncMagicVariantButtons();
+    if (clearExisting) setStatus("已取消 100%：该版本必须先用 Real-ESRGAN 放大，再缩回原尺寸。");
   }
   if (changed && clearExisting) {
-    clearMagicPreview();
+    markScaleResultsStale();
+  }
+}
+
+function syncMagicVariantButtons() {
+  els.scaleVariantButtons?.querySelectorAll("[data-scale-variant]").forEach((button) => {
+    setChoiceButtonState(button, state.magicVariantKeys.has(button.dataset.scaleVariant));
+  });
+}
+
+function toggleMagicVariant(key) {
+  const normalized = MAGIC_VARIANT_CONFIGS.some((config) => config.key === key) ? key : "";
+  if (!normalized) return;
+  if (state.magicVariantKeys.has(normalized)) {
+    if (state.magicVariantKeys.size === 1) {
+      setStatus("至少保留一个输出尺寸。", "error");
+      return;
+    }
+    state.magicVariantKeys.delete(normalized);
+  } else {
+    state.magicVariantKeys.add(normalized);
+  }
+  syncMagicVariantButtons();
+  markScaleResultsStale();
+  persistSession();
+}
+
+function toggleScaleProcessingControls() {
+  const shouldExpand = els.scaleProcessingControls.hidden;
+  els.scaleProcessingControls.hidden = !shouldExpand;
+  els.scaleProcessToggleButton.setAttribute("aria-expanded", String(shouldExpand));
+  els.scaleProcessToggleButton.textContent = shouldExpand ? "收起缩放处理" : "缩放处理";
+  if (shouldExpand) {
+    els.exportOptions.hidden = true;
+    els.exportButton.setAttribute("aria-expanded", "false");
+    els.exportButton.textContent = "直接导出";
+  }
+}
+
+function toggleVariantExportOptions(variantKey) {
+  const options = els.animationComparisonStrip.querySelector(`[data-variant-export-options="${variantKey}"]`);
+  if (options) options.hidden = !options.hidden;
+}
+
+function handleVariantExportClick(event) {
+  const originalButton = event.target.closest("[data-original-export]");
+  if (originalButton) {
+    void exportSelectedFormat(originalButton.dataset.originalExport, originalButton);
+    return;
+  }
+  const variantButton = event.target.closest("[data-variant-export]");
+  if (variantButton) {
+    void exportMagicFrames(
+      variantButton.dataset.variantKey,
+      variantButton,
+      variantButton.dataset.variantExport
+    );
   }
 }
 
@@ -337,9 +456,10 @@ function bindEvents() {
   els.saveOutputPathButton.addEventListener("click", selectOutputPath);
   els.clearRuntimeFilesButton.addEventListener("click", clearRuntimeFiles);
   els.uploadInput.addEventListener("change", handleUploadInputChange);
+  els.preprocessEsrSmoothingInput.addEventListener("change", handlePreprocessSmoothingToggle);
   els.previewFrameButton.addEventListener("click", previewCurrentFrame);
-  els.greenToBlackButton.addEventListener("click", applyGreenToBlackPreview);
-  els.greenDesaturateButton.addEventListener("click", applyGreenDesaturatePreview);
+  els.backgroundToBlackButton.addEventListener("click", applyBackgroundToBlackPreview);
+  els.backgroundDesaturateButton.addEventListener("click", applyBackgroundDesaturatePreview);
   els.semiTransparentToBlackButton.addEventListener("click", applySemiTransparentToBlackPreview);
   els.semiTransparentToOpaqueButton.addEventListener("click", applySemiTransparentToOpaquePreview);
   els.savePreviewButton.addEventListener("click", downloadProcessPreviewResult);
@@ -354,21 +474,35 @@ function bindEvents() {
   els.exportSpriteSheetButton.addEventListener("click", () => exportSelectedFormat("sprite_sheet", els.exportSpriteSheetButton));
   els.exportMovButton.addEventListener("click", () => exportSelectedFormat("mov", els.exportMovButton));
   els.exportGifButton.addEventListener("click", () => exportSelectedFormat("gif", els.exportGifButton));
+  els.scaleProcessToggleButton.addEventListener("click", toggleScaleProcessingControls);
   els.magicButton.addEventListener("click", runMagicPreview);
-  els.magicUseRealesrganInput.addEventListener("change", () => {
-    setMagicUseRealesrgan(els.magicUseRealesrganInput.checked);
+  els.magicUseRealesrganButton.addEventListener("click", () => {
+    setMagicUseRealesrgan(!state.magicUseRealesrgan);
+    persistSession();
   });
-  els.magicResizeHardInput.addEventListener("change", () => {
-    setMagicResizeMode(els.magicResizeHardInput.checked ? "hard" : "soft");
+  els.magicResizeHardButton.addEventListener("click", () => {
+    setMagicResizeMode("hard");
+    persistSession();
   });
-  els.magicResizeSoftInput.addEventListener("change", () => {
-    setMagicResizeMode(els.magicResizeSoftInput.checked ? "soft" : "hard");
+  els.magicResizeSoftButton.addEventListener("click", () => {
+    setMagicResizeMode("soft");
+    persistSession();
   });
+  els.scaleVariantButtons.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-scale-variant]");
+    if (button) toggleMagicVariant(button.dataset.scaleVariant);
+  });
+  els.originalVariantExportButton.addEventListener("click", () => {
+    els.originalVariantExportOptions.hidden = !els.originalVariantExportOptions.hidden;
+  });
+  els.animationComparisonStrip.addEventListener("click", handleVariantExportClick);
   setMagicUseRealesrgan(state.magicUseRealesrgan, { clearExisting: false });
   setMagicResizeMode(state.magicResizeMode, { clearExisting: false });
-  els.exportMagicFramesButton.addEventListener("click", () => exportMagicFrames("half", els.exportMagicFramesButton));
-  els.exportMagicQuarterFramesButton.addEventListener("click", () => exportMagicFrames("quarter", els.exportMagicQuarterFramesButton));
-  els.exportMagicEighthFramesButton.addEventListener("click", () => exportMagicFrames("eighth", els.exportMagicEighthFramesButton));
+  syncMagicVariantButtons();
+  els.exportMagicFullFramesButton.addEventListener("click", () => toggleVariantExportOptions("full"));
+  els.exportMagicFramesButton.addEventListener("click", () => toggleVariantExportOptions("half"));
+  els.exportMagicQuarterFramesButton.addEventListener("click", () => toggleVariantExportOptions("quarter"));
+  els.exportMagicEighthFramesButton.addEventListener("click", () => toggleVariantExportOptions("eighth"));
   bindUploadDropzone();
 
   bindTimePair("start", els.startRange, els.startInput, els.startStepDownButton, els.startStepUpButton);
@@ -398,7 +532,6 @@ function bindEvents() {
   els.manualKeyInput.addEventListener("input", syncManualColorLabel);
   els.matteModeInput.addEventListener("change", handleMatteModeChange);
   els.keyModeInput.addEventListener("change", updateChromaVisibility);
-  els.chromaEnabledInput.addEventListener("change", updateChromaVisibility);
   els.corridorEnabledInput.addEventListener("change", updateChromaVisibility);
   els.aiResolutionInput.addEventListener("change", normalizeAiResolutionInput);
 
@@ -412,7 +545,17 @@ function bindEvents() {
       return;
     }
     setFrameSelected(index, target.checked);
-    clearMagicPreview();
+    const selectedFrames = getSelectedFrames();
+    if (target.checked) {
+      const selectedPosition = selectedFrames.findIndex((frame) => frame.index === index);
+      if (selectedPosition >= 0) state.preview.currentIndex = selectedPosition;
+    } else {
+      state.preview.currentIndex = Math.min(
+        state.preview.currentIndex,
+        Math.max(0, selectedFrames.length - 1)
+      );
+    }
+    markScaleResultsStale();
     if (state.orderedSelectionMode) {
       renderFrames();
     } else {
@@ -429,7 +572,7 @@ function bindEvents() {
     state.selected = new Set();
     state.selectionOrder = [];
     state.preview.currentIndex = 0;
-    clearMagicPreview();
+    markScaleResultsStale();
     renderFrames();
   });
   els.selectOddButton.addEventListener("click", () => selectFrames((frame) => (frame.index + 1) % 2 === 1));
@@ -445,14 +588,14 @@ function bindEvents() {
     state.selected = next;
     state.selectionOrder = state.job.frames.filter((frame) => next.has(frame.index)).map((frame) => frame.index);
     state.preview.currentIndex = 0;
-    clearMagicPreview();
+    markScaleResultsStale();
     renderFrames();
   });
   els.orderedSelectionInput.addEventListener("change", () => {
     setOrderedSelectionMode(els.orderedSelectionInput.checked);
     normalizeSelectionOrder();
     state.preview.currentIndex = 0;
-    clearMagicPreview();
+    markScaleResultsStale("帧顺序已变化，点击“更新缩放处理”会复用图像并更新顺序。");
     renderFrames();
   });
   els.clearPreviewFramesButton.addEventListener("click", clearPreviewFrames);
@@ -478,7 +621,7 @@ function bindEvents() {
   els.previewReverseInput.addEventListener("change", () => {
     state.preview.isReversed = els.previewReverseInput.checked;
     state.preview.currentIndex = 0;
-    clearMagicPreview();
+    markScaleResultsStale("播放与导出顺序已变化，点击“更新缩放处理”会复用图像并更新顺序。");
     syncAnimationPreview();
     persistSession();
   });
@@ -512,10 +655,6 @@ function bindEvents() {
 
   [
     els.keepEveryInput,
-    els.outputScaleInput,
-    els.canvasModeInput,
-    els.reducePxInput,
-    els.chromaEnabledInput,
     els.keyModeInput,
     els.manualKeyInput,
     els.thresholdInput,
@@ -533,8 +672,8 @@ function bindEvents() {
     els.lumaGammaInput,
     els.lumaStrengthInput,
     els.lumaPolarityInput,
-    els.batchGreenToBlackInput,
-    els.batchGreenDesaturateInput,
+    els.batchBackgroundToBlackInput,
+    els.batchBackgroundDesaturateInput,
     els.batchSemiTransparentToBlackInput,
     els.batchSemiTransparentToOpaqueInput,
     els.startInput,
@@ -543,6 +682,102 @@ function bindEvents() {
     const eventName = element instanceof HTMLInputElement && element.type === "checkbox" ? "change" : "input";
     element.addEventListener(eventName, persistSession);
   });
+}
+
+function setPreprocessSmoothingInstalling(installing) {
+  preprocessSmoothingInstalling = Boolean(installing);
+  els.preprocessEsrSmoothingInput.disabled = preprocessSmoothingInstalling;
+  updateSegmentConfirmationUI();
+}
+
+async function validateRestoredPreprocessSmoothing() {
+  if (!els.preprocessEsrSmoothingInput.checked) {
+    return;
+  }
+  setPreprocessSmoothingInstalling(true);
+  try {
+    const statusData = await apiJson("/api/realesrgan-status", {
+      method: "POST",
+      body: {},
+    });
+    if (!statusData.status?.installed) {
+      els.preprocessEsrSmoothingInput.checked = false;
+      setStatus("Real-ESRGAN 当前未安装。请重新勾选“先做平滑处理”，确认后会自动安装。", "error");
+      persistSession();
+    }
+  } catch (error) {
+    els.preprocessEsrSmoothingInput.checked = false;
+    setStatus(`无法确认 Real-ESRGAN 安装状态：${error.message || String(error)}`, "error");
+    persistSession();
+  } finally {
+    setPreprocessSmoothingInstalling(false);
+  }
+}
+
+async function handlePreprocessSmoothingToggle() {
+  if (els.preprocessEsrSmoothingInput.checked) {
+    const confirmed = window.confirm(
+      "“先做平滑处理”会在抠图前执行以下流程：\n\n" +
+        "1. 每一帧先使用 Real-ESRGAN anime 放大 4 倍。\n" +
+        "2. 再高质量缩回原始尺寸。\n" +
+        "3. 最后才开始抠图。\n\n" +
+        "用途：平滑原图锯齿与压缩噪点，让抠图边缘更连续。最终画布尺寸不会改变。\n\n" +
+        "注意：预览和批处理都会明显变慢。若本机未安装 Real-ESRGAN，确认后会自动下载并安装官方 Windows 便携包。安装完成前，预览和批处理按钮都不可用。\n\n" +
+        "确认启用吗？"
+    );
+    if (!confirmed) {
+      els.preprocessEsrSmoothingInput.checked = false;
+      setStatus("已取消先做平滑处理，仍按原始帧直接抠图。");
+      persistSession();
+      return;
+    }
+
+    if (realesrganInstallPromise) {
+      await realesrganInstallPromise;
+      return;
+    }
+
+    setPreprocessSmoothingInstalling(true);
+    realesrganInstallPromise = (async () => {
+      try {
+        setStatus("正在检查 Real-ESRGAN 安装状态，完成前不能预览或批处理...");
+        const statusData = await apiJson("/api/realesrgan-status", {
+          method: "POST",
+          body: {},
+        });
+        if (!statusData.status?.installed) {
+          setStatus("正在自动下载并安装 Real-ESRGAN，完成前不能预览或批处理...");
+          const installData = await apiJson("/api/install-realesrgan", {
+            method: "POST",
+            body: { confirmed: true },
+          });
+          if (!installData.result?.status?.installed) {
+            throw new Error("Real-ESRGAN 安装未完成，请重试。");
+          }
+        }
+        setStatus("Real-ESRGAN 已就绪，已启用：ESR x4 → 缩回原尺寸 → 抠图。", "success");
+        return true;
+      } catch (error) {
+        els.preprocessEsrSmoothingInput.checked = false;
+        setStatus(`Real-ESRGAN 自动安装失败：${error.message || String(error)}`, "error");
+        return false;
+      }
+    })();
+
+    try {
+      await realesrganInstallPromise;
+    } finally {
+      realesrganInstallPromise = null;
+      setPreprocessSmoothingInstalling(false);
+      resetProcessPreview();
+      persistSession();
+    }
+    return;
+  } else {
+    setStatus("已关闭先做平滑处理，恢复为原始帧直接抠图。");
+  }
+  resetProcessPreview();
+  persistSession();
 }
 
 function bindTimePair(key, rangeEl, numberEl, decreaseButton, increaseButton) {
@@ -758,9 +993,6 @@ function setProcessPreviewStageActive(kind, isActive) {
 }
 
 function currentMatteMode() {
-  if (!els.chromaEnabledInput.checked) {
-    return "none";
-  }
   return els.matteModeInput.value || "chroma";
 }
 
@@ -867,7 +1099,7 @@ async function handleMatteModeChange() {
     updateChromaVisibility();
     persistSession();
   }
-  els.matteModeInput.disabled = !els.chromaEnabledInput.checked;
+  els.matteModeInput.disabled = false;
 }
 
 function currentUsesCorridorKey() {
@@ -920,33 +1152,6 @@ function enforceAutomaticAiSettings(shouldPersist = false) {
   }
 }
 
-function normalizeOutputScalePercent(value) {
-  const numeric = Number(value);
-  const raw = Number.isFinite(numeric) ? numeric : OUTPUT_SCALE_DEFAULT_PERCENT;
-  return clamp(Math.round(raw), OUTPUT_SCALE_MIN_PERCENT, OUTPUT_SCALE_MAX_PERCENT);
-}
-
-function currentOutputScale() {
-  return normalizeOutputScalePercent(els.outputScaleInput.value) / 100;
-}
-
-function effectiveCanvasModeForProcessing() {
-  return isVideoUpload() ? "auto" : els.canvasModeInput.value;
-}
-
-function effectiveReducePxForProcessing() {
-  return isVideoUpload() ? 0 : Number(els.reducePxInput.value || 0);
-}
-
-function outputScalePercentFromLegacyTarget(targetSize) {
-  const height = Number(currentUploadInfo().height || 0);
-  const target = Number(targetSize || 0);
-  if (!height || !target) {
-    return null;
-  }
-  return normalizeOutputScalePercent((target / height) * 100);
-}
-
 function applyAutomaticMatteDefaults() {
   els.thresholdInput.value = "80";
   els.softnessInput.value = "16";
@@ -961,10 +1166,10 @@ function applyAutomaticMatteDefaults() {
 function collectFormState() {
   return {
     keep_every: Number(els.keepEveryInput.value || 1),
-    output_scale: currentOutputScale(),
-    canvas_mode: els.canvasModeInput.value,
-    reduce_px: Number(els.reducePxInput.value || 0),
-    chroma_enabled: els.chromaEnabledInput.checked,
+    output_scale: 1,
+    canvas_mode: "auto",
+    reduce_px: 0,
+    chroma_enabled: true,
     matte_mode: currentMatteMode(),
     key_mode: els.keyModeInput.value,
     manual_key_hex: els.manualKeyInput.value,
@@ -983,8 +1188,9 @@ function collectFormState() {
     luma_gamma: Number(els.lumaGammaInput.value || 0.55),
     luma_strength: Number(els.lumaStrengthInput.value || 1.7),
     luma_polarity: els.lumaPolarityInput.value || "auto",
-    batch_green_to_black: els.batchGreenToBlackInput.checked,
-    batch_green_desaturate: els.batchGreenDesaturateInput.checked,
+    preprocess_esr_smoothing: els.preprocessEsrSmoothingInput.checked,
+    batch_background_to_black: els.batchBackgroundToBlackInput.checked,
+    batch_background_desaturate: els.batchBackgroundDesaturateInput.checked,
     batch_semitransparent_to_black: els.batchSemiTransparentToBlackInput.checked,
     batch_semitransparent_to_opaque: els.batchSemiTransparentToOpaqueInput.checked,
     preview_background: state.preview.background,
@@ -1000,6 +1206,7 @@ function collectFormState() {
     },
     magic_resize_mode: state.magicResizeMode,
     magic_use_realesrgan: state.magicUseRealesrgan,
+    magic_variant_keys: [...state.magicVariantKeys],
     segment: {
       start: Number(state.segment.start || 0),
       end: Number(state.segment.end || 0),
@@ -1018,10 +1225,10 @@ function collectProcessingPayload() {
     start_frame: state.segment.startFrame,
     end_frame: state.segment.endFrame,
     keep_every: Number(els.keepEveryInput.value || 1),
-    output_scale: currentOutputScale(),
-    canvas_mode: effectiveCanvasModeForProcessing(),
-    reduce_px: effectiveReducePxForProcessing(),
-    chroma_enabled: els.chromaEnabledInput.checked,
+    output_scale: 1,
+    canvas_mode: "auto",
+    reduce_px: 0,
+    chroma_enabled: true,
     matte_mode: currentMatteMode(),
     key_mode: els.keyModeInput.value,
     manual_key_hex: els.manualKeyInput.value,
@@ -1039,8 +1246,9 @@ function collectProcessingPayload() {
     luma_gamma: Number(els.lumaGammaInput.value || 0.55),
     luma_strength: Number(els.lumaStrengthInput.value || 1.7),
     luma_polarity: els.lumaPolarityInput.value || "auto",
-    batch_green_to_black: els.batchGreenToBlackInput.checked,
-    batch_green_desaturate: els.batchGreenDesaturateInput.checked,
+    preprocess_esr_smoothing: els.preprocessEsrSmoothingInput.checked,
+    batch_background_to_black: els.batchBackgroundToBlackInput.checked,
+    batch_background_desaturate: els.batchBackgroundDesaturateInput.checked,
     batch_semitransparent_to_black: els.batchSemiTransparentToBlackInput.checked,
     batch_semitransparent_to_opaque: els.batchSemiTransparentToOpaqueInput.checked,
   };
@@ -1052,20 +1260,6 @@ function applyFormState(snapshot) {
   }
 
   if (snapshot.keep_every != null) els.keepEveryInput.value = String(snapshot.keep_every);
-  if (snapshot.output_scale != null) {
-    els.outputScaleInput.value = String(normalizeOutputScalePercent(Number(snapshot.output_scale) * 100));
-  } else if (snapshot.target_size != null) {
-    const legacyPercent = outputScalePercentFromLegacyTarget(snapshot.target_size);
-    if (legacyPercent != null) {
-      els.outputScaleInput.value = String(legacyPercent);
-    }
-  }
-  if (snapshot.canvas_mode && [...els.canvasModeInput.options].some((option) => option.value === snapshot.canvas_mode)) {
-    els.canvasModeInput.value = snapshot.canvas_mode;
-  }
-  if (snapshot.reduce_px != null) els.reducePxInput.value = String(snapshot.reduce_px);
-  syncSizingControlsForUpload();
-  if (snapshot.chroma_enabled != null) els.chromaEnabledInput.checked = Boolean(snapshot.chroma_enabled);
   if (snapshot.matte_mode && [...els.matteModeInput.options].some((option) => option.value === snapshot.matte_mode)) {
     els.matteModeInput.value = snapshot.matte_mode;
   }
@@ -1097,9 +1291,16 @@ function applyFormState(snapshot) {
   } else {
     els.lumaPolarityInput.value = "auto";
   }
-  if (snapshot.batch_green_to_black != null) els.batchGreenToBlackInput.checked = Boolean(snapshot.batch_green_to_black);
-  if (snapshot.batch_green_desaturate != null) {
-    els.batchGreenDesaturateInput.checked = Boolean(snapshot.batch_green_desaturate);
+  if (snapshot.preprocess_esr_smoothing != null) {
+    els.preprocessEsrSmoothingInput.checked = Boolean(snapshot.preprocess_esr_smoothing);
+  }
+  const batchBackgroundToBlack = snapshot.batch_background_to_black ?? snapshot.batch_green_to_black;
+  if (batchBackgroundToBlack != null) {
+    els.batchBackgroundToBlackInput.checked = Boolean(batchBackgroundToBlack);
+  }
+  const batchBackgroundDesaturate = snapshot.batch_background_desaturate ?? snapshot.batch_green_desaturate;
+  if (batchBackgroundDesaturate != null) {
+    els.batchBackgroundDesaturateInput.checked = Boolean(batchBackgroundDesaturate);
   }
   if (snapshot.batch_semitransparent_to_black != null) {
     els.batchSemiTransparentToBlackInput.checked = Boolean(snapshot.batch_semitransparent_to_black);
@@ -1135,6 +1336,16 @@ function applyFormState(snapshot) {
   }
   if (snapshot.magic_use_realesrgan != null) {
     setMagicUseRealesrgan(Boolean(snapshot.magic_use_realesrgan), { clearExisting: false });
+  }
+  if (Array.isArray(snapshot.magic_variant_keys)) {
+    const validKeys = snapshot.magic_variant_keys.filter((key) =>
+      MAGIC_VARIANT_CONFIGS.some((config) => config.key === key)
+    );
+    state.magicVariantKeys = new Set(validKeys.length ? validKeys : ["half"]);
+    if (state.magicVariantKeys.has("full") && !state.magicUseRealesrgan) {
+      setMagicUseRealesrgan(true, { clearExisting: false });
+    }
+    syncMagicVariantButtons();
   }
 
   if (snapshot.segment) {
@@ -1211,7 +1422,7 @@ function restoreSessionFromStorage() {
   }
 
   if (snapshot.upload) {
-    applyUpload(snapshot.upload, { resetSizing: false });
+    applyUpload(snapshot.upload);
   } else {
     resetPreviewState();
     state.upload = null;
@@ -1550,7 +1761,7 @@ async function selectOutputPath() {
 async function clearRuntimeFiles() {
   const confirmed = window.confirm(
     "确定清空 Sprite Video Lab 的全部内部文件吗？\n\n" +
-      "将删除导入副本、处理帧、预览、MAGIC/线稿缓存，以及输出目录中由本程序创建的时间戳导出文件夹。\n" +
+      "将删除导入副本、处理帧、预览、缩放/线稿缓存，以及输出目录中由本程序创建的时间戳导出文件夹。\n" +
       "不会删除已经下载/另存的文件，也不会删除输出目录中的其他文件。\n\n" +
       "此操作无法撤销。"
   );
@@ -1709,6 +1920,8 @@ function syncResultActions() {
   const hasSelection = hasJob && state.selected.size > 0;
   els.openProcessedButton.disabled = !hasJob || !state.job?.processed_dir;
   els.exportButton.disabled = !hasSelection;
+  els.scaleProcessToggleButton.disabled = !hasSelection;
+  els.originalVariantExportButton.disabled = !hasSelection;
   [els.exportFramesButton, els.exportSpriteSheetButton, els.exportMovButton, els.exportGifButton].forEach((button) => {
     button.disabled = !hasSelection;
   });
@@ -1721,23 +1934,7 @@ function syncResultActions() {
   els.orderedSelectionInput.disabled = !hasJob;
 }
 
-function resetSizingControlsForNewUpload() {
-  els.outputScaleInput.value = String(OUTPUT_SCALE_DEFAULT_PERCENT);
-  els.reducePxInput.value = "0";
-  syncSizingControlsForUpload();
-}
-
-function syncSizingControlsForUpload() {
-  const forceSourceCanvas = isVideoUpload();
-  if (forceSourceCanvas) {
-    els.canvasModeInput.value = "auto";
-    els.reducePxInput.value = "0";
-  }
-  els.canvasModeInput.disabled = forceSourceCanvas;
-  els.reducePxInput.disabled = forceSourceCanvas;
-}
-
-function applyUpload(upload, { resetSizing = true } = {}) {
+function applyUpload(upload) {
   resetPreviewState();
   state.upload = upload;
   state.job = null;
@@ -1747,10 +1944,6 @@ function applyUpload(upload, { resetSizing = true } = {}) {
   state.selected = new Set();
   state.selectionOrder = [];
   setOrderedSelectionMode(false);
-  if (resetSizing) {
-    resetSizingControlsForNewUpload();
-  }
-  syncSizingControlsForUpload();
 
   const info = currentUploadInfo(upload);
   const mediaType = uploadMediaType(upload);
@@ -2038,6 +2231,7 @@ function renderSegmentControls() {
 
 function updateSegmentConfirmationUI() {
   const hasUpload = Boolean(state.upload);
+  const primaryActionsLocked = !hasUpload || preprocessSmoothingInstalling;
   const isImage = isImageUpload();
   const isSequence = isImageSequenceUpload();
   const startField = els.startRange.closest(".field");
@@ -2056,8 +2250,8 @@ function updateSegmentConfirmationUI() {
     els.segmentConfirmStatus.className = "segment-status image";
     els.segmentConfirmStatus.textContent = "\u5355\u5F20\u56FE\u7247\u6A21\u5F0F";
     els.segmentConfirmHint.textContent = "\u65E0\u9700\u8C03\u6574\u65F6\u95F4\u8303\u56F4\u3002\u5F53\u524D\u53C2\u6570\u4F1A\u76F4\u63A5\u4F5C\u7528\u4E8E\u8FD9 1 \u5E27\u3002";
-    els.previewFrameButton.disabled = !hasUpload;
-    els.processButton.disabled = !hasUpload;
+    els.previewFrameButton.disabled = primaryActionsLocked;
+    els.processButton.disabled = primaryActionsLocked;
     els.processStepShell.classList.remove("locked");
     els.processLockNote.hidden = true;
     updateVideoProgress(0);
@@ -2071,8 +2265,8 @@ function updateSegmentConfirmationUI() {
     els.segmentConfirmStatus.className = "segment-status confirmed";
     els.segmentConfirmStatus.textContent = `\u56FE\u7247\u5E8F\u5217 \u7B2C ${state.segment.startFrame} \u5E27 - \u7B2C ${state.segment.endFrame} \u5E27`;
     els.segmentConfirmHint.textContent = "\u5E8F\u5217\u4F1A\u6309\u6587\u4EF6\u540D\u987A\u5E8F\u5904\u7406\uFF0C\u53EF\u4EE5\u8C03\u6574\u8D77\u6B62\u5E27\u3002\u518D\u6B21\u62D6\u5165\u591A\u56FE\u4F1A\u66FF\u6362\u5F53\u524D\u8F93\u5165\uFF0C\u4E0D\u4F1A\u8FFD\u52A0\u3002";
-    els.previewFrameButton.disabled = !hasUpload;
-    els.processButton.disabled = !hasUpload;
+    els.previewFrameButton.disabled = primaryActionsLocked;
+    els.processButton.disabled = primaryActionsLocked;
     els.processStepShell.classList.remove("locked");
     els.processLockNote.hidden = true;
     updateVideoProgress(0);
@@ -2096,8 +2290,8 @@ function updateSegmentConfirmationUI() {
   els.segmentConfirmStatus.className = "segment-status confirmed";
   els.segmentConfirmStatus.textContent = `\u5F53\u524D\u9009\u533A \u7B2C ${state.segment.startFrame} \u5E27 - \u7B2C ${state.segment.endFrame} \u5E27`;
   els.segmentConfirmHint.textContent = "\u62D6\u52A8\u8D77\u70B9\u6216\u7EC8\u70B9\u540E\uFF0C\u5DE6\u4FA7\u89C6\u9891\u4F1A\u7ACB\u5373\u8DF3\u56DE\u65B0\u8D77\u70B9\u5E76\u9759\u97F3\u5FAA\u73AF\u3002";
-  els.previewFrameButton.disabled = false;
-  els.processButton.disabled = false;
+  els.previewFrameButton.disabled = preprocessSmoothingInstalling;
+  els.processButton.disabled = preprocessSmoothingInstalling;
   els.processStepShell.classList.remove("locked");
   els.processLockNote.hidden = true;
   updateVideoProgress(els.videoPreview.currentTime || state.segment.start || 0);
@@ -2118,14 +2312,17 @@ async function processVideo() {
   await withBusy(els.processButton, async () => {
     stopPreviewTimer();
     const matteLabel = formatMatteModeLabel(matteMode);
+    const processLead = payload.preprocess_esr_smoothing
+      ? "\u6B63\u5728\u5148\u505A ESR \u5E73\u6ED1\u5904\u7406\uFF0C\u518D"
+      : "\u6B63\u5728";
     setStatus(
       matteMode !== "none"
-        ? `\u6B63\u5728\u8FD0\u884C ${matteLabel} \u62A0\u56FE\u3002`
+        ? `${processLead}\u8FD0\u884C ${matteLabel} \u62A0\u56FE\u3002`
         : isImageUpload()
-        ? "\u6B63\u5728\u5904\u7406\u5355\u5F20\u56FE\u7247\u7684\u900F\u660E\u8FB9\u7F18\u548C\u7F29\u653E..."
+        ? `${processLead}\u5904\u7406\u5355\u5F20\u56FE\u7247\u7684\u900F\u660E\u8FB9\u7F18\u548C\u7F29\u653E...`
         : isImageSequenceUpload()
-        ? "\u6B63\u5728\u6309\u6587\u4EF6\u540D\u987A\u5E8F\u5904\u7406\u56FE\u7247\u5E8F\u5217..."
-        : "\u6b63\u5728\u62bd\u5e27\u5e76\u5904\u7406\u900f\u660e\u8fb9\u7f18\uff0c\u8fd9\u4e00\u6b65\u53ef\u80fd\u9700\u8981\u51e0\u5341\u79d2\u3002"
+        ? `${processLead}\u6309\u6587\u4EF6\u540D\u987A\u5E8F\u5904\u7406\u56FE\u7247\u5E8F\u5217...`
+        : `${processLead}\u62BD\u5E27\u5E76\u5904\u7406\u900F\u660E\u8FB9\u7F18\uFF0C\u8FD9\u4E00\u6B65\u53EF\u80FD\u9700\u8981\u51E0\u5341\u79D2\u3002`
     );
     const data = await apiJson("/api/process", {
       method: "POST",
@@ -2172,14 +2369,17 @@ async function previewCurrentFrame() {
 
   await withBusy(els.previewFrameButton, async () => {
     const matteLabel = formatMatteModeLabel(matteMode);
+    const previewLead = payload.preprocess_esr_smoothing
+      ? "\u6B63\u5728\u5148\u505A ESR \u5E73\u6ED1\u5904\u7406\uFF0C\u518D"
+      : "\u6B63\u5728";
     setStatus(
       matteMode !== "none"
-        ? `\u6B63\u5728\u9884\u89C8 ${matteLabel} \u62A0\u56FE\u3002`
+        ? `${previewLead}\u9884\u89C8 ${matteLabel} \u62A0\u56FE\u3002`
         : isImageUpload()
-        ? "\u6B63\u5728\u5957\u7528\u53C2\u6570\u9884\u89C8\u5355\u5F20\u56FE\u7247..."
+        ? `${previewLead}\u5957\u7528\u53C2\u6570\u9884\u89C8\u5355\u5F20\u56FE\u7247...`
         : isImageSequenceUpload()
-        ? `\u6B63\u5728\u9884\u89C8\u56FE\u7247\u5E8F\u5217\u7B2C ${sampleFrame} \u5E27...`
-        : "\u6b63\u5728\u62BD\u53D6\u5F53\u524D\u5E27\u5E76\u5957\u7528\u53C2\u6570..."
+        ? `${previewLead}\u9884\u89C8\u56FE\u7247\u5E8F\u5217\u7B2C ${sampleFrame} \u5E27...`
+        : `${previewLead}\u62BD\u53D6\u5F53\u524D\u5E27\u5E76\u5957\u7528\u53C2\u6570...`
     );
     const data = await apiJson("/api/preview-frame", {
       method: "POST",
@@ -2215,15 +2415,15 @@ async function downloadProcessPreviewResult() {
   });
 }
 
-async function applyGreenToBlackPreview() {
+async function applyBackgroundToBlackPreview() {
   if (!state.processPreview?.preview_id) {
-    setStatus("\u5148\u9884\u89C8\u5F53\u524D\u5E27\uFF0C\u518D\u5904\u7406\u6B8B\u7559\u7EFF\u8272\u3002", "error");
+    setStatus("\u5148\u9884\u89C8\u5F53\u524D\u5E27\uFF0C\u518D\u5904\u7406\u80CC\u666F\u6B8B\u7559\u3002", "error");
     return;
   }
 
-  await withBusy(els.greenToBlackButton, async () => {
-    setStatus("\u6B63\u5728\u628A\u9884\u89C8\u56FE\u91CC\u7684\u6B8B\u7559\u7EFF\u8272\u6D82\u9ED1...");
-    const data = await apiJson("/api/preview-green-to-black", {
+  await withBusy(els.backgroundToBlackButton, async () => {
+    setStatus("\u6B63\u5728\u628A\u9884\u89C8\u56FE\u91CC\u7684\u80CC\u666F\u6B8B\u7559\u8F6C\u9ED1...");
+    const data = await apiJson("/api/preview-background-to-black", {
       method: "POST",
       body: {
         preview_id: state.processPreview.preview_id,
@@ -2233,20 +2433,20 @@ async function applyGreenToBlackPreview() {
     });
     state.processPreview = data.preview;
     renderProcessPreview();
-    const changed = Number(data.preview?.postprocess?.green_to_black?.changed_pixels || 0);
-    setStatus(`\u6B8B\u7EFF\u6D82\u9ED1\u5B8C\u6210\uFF0C\u5904\u7406\u4E86 ${changed.toLocaleString()} \u4E2A\u50CF\u7D20\u3002`, "success");
+    const changed = Number(data.preview?.postprocess?.background_to_black?.changed_pixels || 0);
+    setStatus(`\u80CC\u666F\u6B8B\u7559\u8F6C\u9ED1\u5B8C\u6210\uFF0C\u5904\u7406\u4E86 ${changed.toLocaleString()} \u4E2A\u50CF\u7D20\u3002`, "success");
   });
 }
 
-async function applyGreenDesaturatePreview() {
+async function applyBackgroundDesaturatePreview() {
   if (!state.processPreview?.preview_id) {
-    setStatus("\u5148\u9884\u89C8\u5F53\u524D\u5E27\uFF0C\u518D\u5904\u7406\u6B8B\u7559\u7EFF\u8272\u3002", "error");
+    setStatus("\u5148\u9884\u89C8\u5F53\u524D\u5E27\uFF0C\u518D\u5904\u7406\u80CC\u666F\u6B8B\u7559\u3002", "error");
     return;
   }
 
-  await withBusy(els.greenDesaturateButton, async () => {
-    setStatus("\u6B63\u5728\u628A\u9884\u89C8\u56FE\u91CC\u7684\u6B8B\u7559\u7EFF\u8272\u53BB\u9971\u548C...");
-    const data = await apiJson("/api/preview-green-desaturate", {
+  await withBusy(els.backgroundDesaturateButton, async () => {
+    setStatus("\u6B63\u5728\u628A\u9884\u89C8\u56FE\u91CC\u7684\u80CC\u666F\u6B8B\u7559\u9971\u548C\u5EA6\u5F52\u96F6...");
+    const data = await apiJson("/api/preview-background-desaturate", {
       method: "POST",
       body: {
         preview_id: state.processPreview.preview_id,
@@ -2256,8 +2456,8 @@ async function applyGreenDesaturatePreview() {
     });
     state.processPreview = data.preview;
     renderProcessPreview();
-    const changed = Number(data.preview?.postprocess?.green_desaturate?.changed_pixels || 0);
-    setStatus(`\u6B8B\u7EFF\u53BB\u9971\u548C\u5B8C\u6210\uFF0C\u5904\u7406\u4E86 ${changed.toLocaleString()} \u4E2A\u50CF\u7D20\u3002`, "success");
+    const changed = Number(data.preview?.postprocess?.background_desaturate?.changed_pixels || 0);
+    setStatus(`\u80CC\u666F\u6B8B\u7559\u9971\u548C\u5EA6\u5F52\u96F6\u5B8C\u6210\uFF0C\u5904\u7406\u4E86 ${changed.toLocaleString()} \u4E2A\u50CF\u7D20\u3002`, "success");
   });
 }
 
@@ -2354,17 +2554,17 @@ function triggerFileDownload(url, filename) {
 }
 
 function updateSavePreviewButton() {
-  if (!els.savePreviewButton || !els.greenToBlackButton || !els.greenDesaturateButton || !els.semiTransparentToBlackButton || !els.semiTransparentToOpaqueButton) {
+  if (!els.savePreviewButton || !els.backgroundToBlackButton || !els.backgroundDesaturateButton || !els.semiTransparentToBlackButton || !els.semiTransparentToOpaqueButton) {
     return;
   }
 
   const isSameUpload = !state.processPreview?.upload_id || state.processPreview.upload_id === state.upload?.upload_id;
   const canDownload = Boolean(state.upload && isSameUpload && state.processPreview?.preview_id && state.processPreview?.processed_url);
   const canPostprocess = Boolean(state.upload && isSameUpload && state.processPreview?.preview_id);
-  els.greenToBlackButton.hidden = !state.upload;
-  els.greenToBlackButton.disabled = !canPostprocess;
-  els.greenDesaturateButton.hidden = !state.upload;
-  els.greenDesaturateButton.disabled = !canPostprocess;
+  els.backgroundToBlackButton.hidden = !state.upload;
+  els.backgroundToBlackButton.disabled = !canPostprocess;
+  els.backgroundDesaturateButton.hidden = !state.upload;
+  els.backgroundDesaturateButton.disabled = !canPostprocess;
   els.semiTransparentToBlackButton.hidden = !state.upload;
   els.semiTransparentToBlackButton.disabled = !canPostprocess;
   els.semiTransparentToOpaqueButton.hidden = !state.upload;
@@ -2540,7 +2740,7 @@ function selectFrames(predicate) {
   state.selected = new Set(state.job.frames.filter(predicate).map((frame) => frame.index));
   state.selectionOrder = state.job.frames.filter((frame) => state.selected.has(frame.index)).map((frame) => frame.index);
   state.preview.currentIndex = 0;
-  clearMagicPreview();
+  markScaleResultsStale();
   renderFrames();
 }
 
@@ -2982,13 +3182,14 @@ function magicVariantData(key) {
   return key === "half" ? state.magicPreview : null;
 }
 
-function drawMagicVariantPlaceholder(config, message = "\u7B49\u5F85 MAGIC") {
+function drawMagicVariantPlaceholder(config, message = "等待缩放处理") {
   const ui = magicVariantElements(config);
   if (!ui.canvas) {
     return;
   }
   const variant = magicVariantData(config.key);
   const canvas = ui.canvas;
+  delete canvas.dataset.hasRenderedFrame;
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = state.preview.background;
@@ -3005,7 +3206,7 @@ function drawMagicVariantPlaceholder(config, message = "\u7B49\u5F85 MAGIC") {
   ui.exportButton.disabled = !variant?.frames?.length;
 }
 
-function drawMagicPlaceholder(message = "\u7B49\u5F85 MAGIC") {
+function drawMagicPlaceholder(message = "等待缩放处理") {
   MAGIC_VARIANT_CONFIGS.forEach((config) => drawMagicVariantPlaceholder(config, message));
 }
 
@@ -3021,7 +3222,7 @@ function updateMagicVariantControls(config, selectedCount) {
     : "0 / 0";
   ui.count.textContent = `\u5DF2\u751F\u6210 ${variant?.frame_count || 0} \u5E27`;
   ui.sizeLabel.textContent = formatMagicOutputSize(variant);
-  ui.exportButton.disabled = !variant?.frames?.length;
+  ui.exportButton.disabled = !variant?.frames?.length || Boolean(state.magicPreview?.stale);
 }
 
 function updateMagicPreviewControls(selectedCount) {
@@ -3039,18 +3240,15 @@ function magicFrameForSelectedFrame(sourceFrame, selectedPosition, variantKey = 
   if (!variant?.frames || !sourceFrame) {
     return null;
   }
-  const magicFrame = variant.frames.find((frame) => Number(frame.index) === Number(selectedPosition)) || null;
-  if (!magicFrame || Number(magicFrame.source_index) !== Number(sourceFrame.index)) {
-    return null;
-  }
-  return magicFrame;
+  return variant.frames.find((frame) => Number(frame.source_index) === Number(sourceFrame.index)) || null;
 }
 
 function renderMagicPreviewFrameImage(config, image, magicFrame, selectedCount) {
   const ui = magicVariantElements(config);
   paintFrameOnCanvas(ui.canvas, image);
+  ui.canvas.dataset.hasRenderedFrame = "true";
   ui.empty.hidden = true;
-  ui.frameLabel.textContent = `${config.label} #${String(Number(magicFrame.index || 0) + 1).padStart(3, "0")}`;
+  ui.frameLabel.textContent = `${config.label} · 源 #${String(Number(magicFrame.source_index || 0) + 1).padStart(3, "0")}`;
   updateMagicVariantControls(config, selectedCount);
 }
 
@@ -3061,16 +3259,23 @@ async function syncMagicVariantPreviewFrame(config, sourceFrame, selectedCount, 
     return;
   }
 
+  const preview = state.magicPreview;
+  preview.renderTokens = preview.renderTokens || {};
+  const token = Number(preview.renderTokens[config.key] || 0) + 1;
+  preview.renderTokens[config.key] = token;
+
   const magicFrame = magicFrameForSelectedFrame(sourceFrame, selectedPosition, config.key);
   if (!magicFrame) {
-    drawMagicVariantPlaceholder(config, "\u8FD9\u4E00\u5E27\u9700\u8981\u91CD\u65B0 MAGIC");
+    if (ui.canvas.dataset.hasRenderedFrame === "true") {
+      ui.empty.hidden = true;
+      ui.frameLabel.textContent = `${config.label} · 新帧待更新`;
+    } else {
+      drawMagicVariantPlaceholder(config, "新帧待更新");
+    }
     updateMagicVariantControls(config, selectedCount);
     return;
   }
 
-  state.magicPreview.renderTokens = state.magicPreview.renderTokens || {};
-  const token = Number(state.magicPreview.renderTokens[config.key] || 0) + 1;
-  state.magicPreview.renderTokens[config.key] = token;
   const cached = getCachedPreviewImage(magicFrame.url);
   if (cached) {
     renderMagicPreviewFrameImage(config, cached, magicFrame, selectedCount);
@@ -3079,12 +3284,16 @@ async function syncMagicVariantPreviewFrame(config, sourceFrame, selectedCount, 
 
   try {
     const image = await loadPreviewImage(magicFrame.url);
-    if (token !== state.magicPreview?.renderTokens?.[config.key]) {
+    if (state.magicPreview !== preview || token !== preview.renderTokens?.[config.key]) {
       return;
     }
     renderMagicPreviewFrameImage(config, image, magicFrame, selectedCount);
   } catch (error) {
-    drawMagicVariantPlaceholder(config, "\u52A0\u8F7D MAGIC \u5931\u8D25");
+    if (state.magicPreview !== preview || token !== preview.renderTokens?.[config.key]) {
+      return;
+    }
+    drawMagicVariantPlaceholder(config, "加载缩放版本失败");
+    updateMagicVariantControls(config, selectedCount);
     setStatus(error.message || String(error), "error");
   }
 }
@@ -3096,31 +3305,45 @@ function syncMagicPreviewFrame(sourceFrame, selectedCount, selectedPosition) {
 }
 
 function showMagicPreview() {
-  if (!state.magicPreview?.frames?.length && !state.magicPreview?.variants?.half?.frames?.length) {
+  const hasAnyVariant = MAGIC_VARIANT_CONFIGS.some((config) => magicVariantData(config.key)?.frames?.length);
+  if (!hasAnyVariant) {
     clearMagicPreview();
     return;
   }
+  els.comparisonTitle.textContent = "动画版本对比";
   MAGIC_VARIANT_CONFIGS.forEach((config) => {
     const ui = magicVariantElements(config);
     const variant = magicVariantData(config.key);
     ui.panel.hidden = !variant?.frames?.length;
+    const description = ui.panel?.querySelector(".variant-card-heading span");
+    if (description) {
+      description.textContent = config.key === "full"
+        ? (state.magicPreview.use_realesrgan ? "ESR ×4 后缩回原尺寸" : "未使用 ESR，保持原尺寸")
+        : `${state.magicPreview.use_realesrgan ? "ESR 后" : "直接"}${state.magicPreview.resize_mode_label || magicResizeModeLabel()}缩小`;
+    }
     drawMagicVariantPlaceholder(config);
     updateMagicVariantControls(config, getSelectedFrames().length);
     if (variant?.frames?.length) {
-      void warmPreviewFrames(variant.frames);
+      void warmPreviewFrames(variant.frames).catch(() => {});
     }
   });
+  state.magicPreview.stale = false;
+  els.scaleResultsState.textContent = `已处理 ${state.magicPreview.frame_count || 0} 帧 · ${state.magicPreview.use_realesrgan ? "含 Real-ESRGAN" : "未使用 Real-ESRGAN"} · ${state.magicPreview.resize_mode_label || magicResizeModeLabel()}缩放`;
+  els.magicButton.textContent = "更新缩放处理";
   syncAnimationPreview(false);
 }
 
 function clearMagicPreview() {
   state.magicPreview = null;
+  els.comparisonTitle.textContent = "有效帧预览";
   MAGIC_VARIANT_CONFIGS.forEach((config) => {
     const ui = magicVariantElements(config);
     if (ui.panel) {
       ui.panel.hidden = true;
     }
   });
+  if (els.scaleResultsState) els.scaleResultsState.textContent = "未处理版本";
+  if (els.magicButton) els.magicButton.textContent = "开始缩放处理";
   drawMagicPlaceholder();
 }
 
@@ -3185,17 +3408,40 @@ function syncAnimationPreview(shouldRestartTimer = true) {
   }
 }
 
+function currentScaleRequestDescriptor() {
+  return {
+    job_id: state.job?.job_id || "",
+    selected_indices: getSelectedFrames().map((frame) => frame.index),
+    resize_mode: normalizeMagicResizeMode(state.magicResizeMode),
+    use_realesrgan: Boolean(state.magicUseRealesrgan),
+    variant_keys: MAGIC_VARIANT_CONFIGS
+      .map((config) => config.key)
+      .filter((key) => state.magicVariantKeys.has(key)),
+  };
+}
+
+function scaleRequestStillCurrent(request) {
+  const current = currentScaleRequestDescriptor();
+  return (
+    current.job_id === request.job_id &&
+    current.resize_mode === request.resize_mode &&
+    current.use_realesrgan === request.use_realesrgan &&
+    current.selected_indices.join(",") === request.selected_indices.join(",") &&
+    current.variant_keys.join(",") === request.variant_keys.join(",")
+  );
+}
+
 async function runMagicPreview() {
   if (state.magicInFlight) {
-    setStatus("MAGIC \u6B63\u5728\u5904\u7406\uFF0C\u5148\u7B49\u5F53\u524D\u8FD9\u8F6E\u7ED3\u675F\u3002");
+    setStatus("缩放正在处理，先等当前这轮结束。");
     return;
   }
   if (!state.job) {
-    setStatus("\u8FD8\u6CA1\u6709\u53EF\u4EE5 MAGIC \u7684\u5904\u7406\u7ED3\u679C\u3002", "error");
+    setStatus("还没有可以缩放处理的帧。", "error");
     return;
   }
   if (state.selected.size === 0) {
-    setStatus("\u81F3\u5C11\u9009\u4E00\u5E27\u518D\u70B9 MAGIC\u3002", "error");
+    setStatus("至少选择一帧再开始缩放处理。", "error");
     syncResultActions();
     return;
   }
@@ -3204,37 +3450,49 @@ async function runMagicPreview() {
   syncResultActions();
   try {
     await withBusy(els.magicButton, async () => {
+      const request = currentScaleRequestDescriptor();
       const selectedFrames = getSelectedFrames();
-      const resizeMode = normalizeMagicResizeMode(state.magicResizeMode);
+      const resizeMode = request.resize_mode;
       const resizeModeLabel = magicResizeModeLabel(resizeMode);
-      const useRealesrgan = Boolean(state.magicUseRealesrgan);
+      const useRealesrgan = request.use_realesrgan;
+      const variantKeys = request.variant_keys;
+      const variantLabels = MAGIC_VARIANT_CONFIGS
+        .filter((config) => state.magicVariantKeys.has(config.key))
+        .map((config) => config.label)
+        .join("、");
       const processLabel = useRealesrgan
         ? `Real-ESRGAN 超分后${resizeModeLabel}缩小`
         : `跳过 Real-ESRGAN，直接${resizeModeLabel}缩小`;
-      clearMagicPreview();
-      setStatus(`MAGIC \u6B63\u5728\u5904\u7406 ${selectedFrames.length} \u5E27\uFF1A${processLabel}\u5230 1/2\u30011/4\u30011/8...`);
+      setStatus(`正在处理 ${selectedFrames.length} 帧：${processLabel}，输出 ${variantLabels}...`);
       const data = await apiJson("/api/magic-preview", {
         method: "POST",
-        body: {
-          job_id: state.job.job_id,
-          selected_indices: selectedFrames.map((frame) => frame.index),
-          resize_mode: resizeMode,
-          use_realesrgan: useRealesrgan,
-        },
+        body: request,
       });
+      if (state.job?.job_id !== request.job_id) {
+        setStatus("缩放处理已完成，但当前任务已经切换；旧结果只保留在缓存中，没有覆盖当前任务。", "error");
+        return;
+      }
       state.magicPreview = data.magic;
       showMagicPreview();
+      if (!scaleRequestStillCurrent(request)) {
+        markScaleResultsStale("处理期间帧或参数发生变化；本轮结果已缓存，点击“更新缩放处理”只补算差异。");
+        setStatus("本轮缩放结果已缓存，但帧或参数在处理中发生了变化；请点击“更新缩放处理”。", "error");
+        return;
+      }
       const generatedCount = Number(data.magic.generated_count || 0);
-      const reusedCount = Number(data.magic.reused_count || 0);
-      const cacheLabel = reusedCount > 0
-        ? generatedCount > 0
-          ? `\uFF0C\u672C\u6B21\u65B0\u751F\u6210 ${generatedCount} \u5E27\uFF0C\u590D\u7528\u7F13\u5B58 ${reusedCount} \u5E27`
-          : `\uFF0C\u672C\u6B21\u5168\u90E8\u590D\u7528\u7F13\u5B58\uFF0C\u6CA1\u6709\u91CD\u65B0\u751F\u6210`
-        : "";
+      const generatedVariantCount = Number(data.magic.generated_variant_count || 0);
+      const reusedVariantCount = Number(data.magic.reused_variant_count || 0);
+      const esrReusedCount = Number(data.magic.esr_reused_count || 0);
+      const cacheLabel = generatedCount === 0
+        ? "，全部复用缓存，没有重新处理"
+        : reusedVariantCount > 0
+        ? `，新处理 ${generatedCount} 帧 / ${generatedVariantCount} 个版本，复用 ${reusedVariantCount} 个已有版本`
+        : `，新处理 ${generatedCount} 帧 / ${generatedVariantCount} 个版本`;
+      const esrCacheLabel = esrReusedCount > 0 ? `，其中 ${esrReusedCount} 帧复用 ESR 中间结果` : "";
       const outputProcessLabel = data.magic.use_realesrgan === false
         ? `未使用 Real-ESRGAN，${data.magic.resize_mode_label || resizeModeLabel}缩小`
         : `Real-ESRGAN 超分后${data.magic.resize_mode_label || resizeModeLabel}缩小`;
-      setStatus(`MAGIC \u5B8C\u6210\uFF0C${outputProcessLabel}\uFF0C\u5DF2\u751F\u6210 ${data.magic.frame_count} \u5E27 1/2\u30011/4\u30011/8 \u5C3A\u5BF8\u5BF9\u6BD4\u9884\u89C8${cacheLabel}\u3002`, "success");
+      setStatus(`缩放处理完成：${outputProcessLabel}，${data.magic.frame_count} 帧，输出 ${variantLabels}${cacheLabel}${esrCacheLabel}。`, "success");
     });
   } finally {
     state.magicInFlight = false;
@@ -3242,9 +3500,13 @@ async function runMagicPreview() {
   }
 }
 
-async function exportMagicFrames(variantKey = "half", button = els.exportMagicFramesButton) {
+async function exportMagicFrames(variantKey = "half", button = els.exportMagicFramesButton, exportFormat = "frames") {
   if (!state.magicPreview?.magic_id) {
-    setStatus("\u5148\u70B9 MAGIC \u751F\u6210\u5904\u7406\u540E\u5E27\uFF0C\u518D\u5BFC\u51FA\u3002", "error");
+    setStatus("先生成缩放版本，再导出。", "error");
+    return;
+  }
+  if (state.magicPreview.stale) {
+    setStatus("帧或缩放参数已经变化，请先更新缩放处理；系统只会补算差异。", "error");
     return;
   }
   const config = MAGIC_VARIANT_CONFIGS.find((item) => item.key === variantKey) || MAGIC_VARIANT_CONFIGS[0];
@@ -3255,20 +3517,29 @@ async function exportMagicFrames(variantKey = "half", button = els.exportMagicFr
   }
 
   await withBusy(button, async () => {
-    setStatus(`\u6B63\u5728\u5BFC\u51FA ${config.label} \u5904\u7406\u540E\u5E27...`);
+    const labels = { frames: "Frames", sprite_sheet: "Sprite Sheet", mov: "透明 MOV", gif: "GIF" };
+    const exportLabel = labels[exportFormat] || exportFormat;
+    setStatus(`正在导出 ${config.label} 的 ${exportLabel}...`);
     const data = await apiJson("/api/export-magic-frames", {
       method: "POST",
       body: {
         magic_id: state.magicPreview.magic_id,
         variant_key: config.key,
         video_duration_ms: Number(els.previewIntervalInput.value || 100),
+        export_format: exportFormat,
       },
     });
-    state.exportResult = data.export;
-    renderExportResult();
     const frameCount = Number(data.export?.frame_count || 0);
-    const outputSize = formatMagicOutputSize(data.export);
-    setStatus(`${config.label} \u5904\u7406\u540E\u5E27\u5DF2\u5BFC\u51FA\uFF1A${frameCount} \u5E27\uFF0C MOV \u786C\u8FB9\u7F18\u653E\u5927\u56DE ${outputSize}\uFF0C\u5DF2\u751F\u6210\u900F\u660E MOV\u3001GIF \u548C Sprite Sheet\u3002`, "success");
+    const outputFolder = exportFormat === "frames"
+      ? data.export.frames_dir
+      : exportFormat === "sprite_sheet"
+      ? data.export.sheet_dir
+      : data.export.output_dir;
+    const opened = await openPath(outputFolder);
+    setStatus(
+      `${config.label} ${exportLabel} 已导出，共 ${frameCount} 帧${opened ? "，已打开文件夹" : ""}。`,
+      "success"
+    );
   });
 }
 
@@ -3286,8 +3557,11 @@ function toggleExportOptions() {
   const shouldExpand = els.exportOptions.hidden;
   els.exportOptions.hidden = !shouldExpand;
   els.exportButton.setAttribute("aria-expanded", String(shouldExpand));
-  els.exportButton.textContent = shouldExpand ? "\u6536\u8D77\u5BFC\u51FA\u9009\u9879" : "\u5BFC\u51FA\u9009\u4E2D\u5E27";
+  els.exportButton.textContent = shouldExpand ? "收起直接导出" : "直接导出";
   if (shouldExpand) {
+    els.scaleProcessingControls.hidden = true;
+    els.scaleProcessToggleButton.setAttribute("aria-expanded", "false");
+    els.scaleProcessToggleButton.textContent = "缩放处理";
     setStatus("\u8BF7\u9009\u62E9\u8981\u751F\u6210\u7684\u5BFC\u51FA\u683C\u5F0F\u3002");
   }
 }
@@ -3409,7 +3683,7 @@ function updateChromaVisibility() {
   const usesKeyColorControls = chromaEnabled && matteModeUsesChromaSeed(matteMode);
   const isManual = els.keyModeInput.value === "manual";
   els.corridorEnabledInput.checked = isCorridor;
-  els.matteModeInput.disabled = !els.chromaEnabledInput.checked;
+  els.matteModeInput.disabled = false;
   els.keyModeInput.closest(".field").style.display = usesKeyColorControls ? "" : "none";
   els.manualColorField.style.display = usesKeyColorControls && isManual ? "" : "none";
   document.querySelectorAll(".matte-target-group").forEach((node) => {
@@ -3490,6 +3764,9 @@ async function withBusy(button, task) {
     setStatus(error.message || String(error), "error");
   } finally {
     button.disabled = false;
+    if (button === els.previewFrameButton || button === els.processButton) {
+      updateSegmentConfirmationUI();
+    }
   }
 }
 

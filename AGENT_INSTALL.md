@@ -77,7 +77,11 @@ BiRefNet downloads model files on first use. Treat the first AI preview as an in
 
 ## 5. Optional Real-ESRGAN Line Cleaner Runtime
 
-The experimental line cleaner can call `realesrgan-ncnn-vulkan` with the `realesrgan-x4plus-anime` model. Put the portable package in one of these locations:
+When the user confirms **先做平滑处理**, the WebApp checks this runtime and automatically downloads the official Windows portable package if it is missing. Preview and batch processing stay disabled until installation succeeds. The automatic target is:
+
+- `<configured work dir>\tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe`
+
+The download only starts after the checkbox confirmation and the install API also requires `confirmed: true`. For a manual or shared installation, put the portable package in one of these locations:
 
 - `tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe`
 - `work\tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe`

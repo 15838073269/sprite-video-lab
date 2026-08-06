@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import cgi
+import colorsys
 import importlib.util
 import json
 import math
@@ -11,15 +12,18 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime
 from fractions import Fraction
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from PIL import Image, ImageChops, ImageFilter
 
@@ -158,10 +162,15 @@ CORRIDORKEY_SCREEN_COLORS = {"auto", "green", "blue"}
 CANVAS_MODES = {"auto", "square_bottom", "square_center"}
 LINE_CLEANER_METHODS = {"classic", "realesrgan_anime"}
 REAL_ESRGAN_ANIME_MODEL = "realesrgan-x4plus-anime"
+REAL_ESRGAN_WINDOWS_PACKAGE_URL = (
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/"
+    "realesrgan-ncnn-vulkan-20220424-windows.zip"
+)
 MAGIC_CROP_PADDING = 24
 MAGIC_UPSCALE = 4
 MAGIC_ALPHA_LOSS_FALLBACK_RATIO = 0.05
 MAGIC_VARIANTS = (
+    {"key": "full", "label": "100%", "scale": 1.0, "dir": "frames-100"},
     {"key": "half", "label": "1/2", "scale": 0.5, "dir": "frames"},
     {"key": "quarter", "label": "1/4", "scale": 0.25, "dir": "frames-quarter"},
     {"key": "eighth", "label": "1/8", "scale": 0.125, "dir": "frames-eighth"},
@@ -176,6 +185,7 @@ _FFMPEG_HWACCELS_CACHE: set[str] | None = None
 _BIREFNET_MODEL_CACHE: dict[tuple[str, str], object] = {}
 _CORRIDORKEY_ENGINE_CACHE: dict[tuple[str, str], object] = {}
 _AI_INSTALL_LOCK = threading.Lock()
+_REALESRGAN_INSTALL_LOCK = threading.Lock()
 
 
 def ensure_runtime_dirs() -> None:
@@ -2640,11 +2650,14 @@ def process_video_to_job(
     luma_polarity: str,
     corridorkey_enabled: bool,
     corridorkey_screen: str,
-    batch_green_to_black: bool = False,
-    batch_green_desaturate: bool = False,
+    preprocess_esr_smoothing: bool = False,
+    batch_background_to_black: bool = False,
+    batch_background_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
     batch_semitransparent_to_opaque: bool = False,
 ) -> dict:
+    if preprocess_esr_smoothing:
+        require_realesrgan_smoothing_ready()
     source_path, media_type = source_media_entry(upload_id)
     info = upload_media_info(upload_id, source_path, media_type)
     reduce_px, canvas_mode = effective_canvas_settings(media_type, reduce_px, canvas_mode)
@@ -2705,6 +2718,19 @@ def process_video_to_job(
     output_scale = normalize_output_scale(output_scale)
     target_size = target_size_from_source_height(max(image.height for image in raw_images), output_scale)
 
+    preprocess_esr_info = {
+        "enabled": False,
+        "model": "",
+        "upscale": 1,
+        "restored_to_source_size": False,
+        "frame_count": 0,
+    }
+    if preprocess_esr_smoothing:
+        raw_images, preprocess_esr_info = preprocess_frames_with_realesrgan_smoothing(
+            raw_images,
+            root / "esr-smoothing",
+        )
+
     keyed_frames, key_rgb, matte_info = apply_matte_pipeline(
         raw_images=raw_images,
         chroma_enabled=chroma_enabled,
@@ -2744,8 +2770,8 @@ def process_video_to_job(
         )
     frame_entries: list[dict] = []
     postprocess_changed = {
-        "green_to_black": 0,
-        "green_desaturate": 0,
+        "background_to_black": 0,
+        "background_desaturate": 0,
         "semitransparent_to_black": 0,
         "semitransparent_to_opaque": 0,
     }
@@ -2754,12 +2780,12 @@ def process_video_to_job(
         thumb_name = f"thumb_{index + 1:03d}.png"
         frame_path = processed_dir / frame_name
         thumb_path = thumbs_dir / thumb_name
-        if batch_green_to_black:
-            frame, changed = green_to_black_image(frame)
-            postprocess_changed["green_to_black"] += changed
-        if batch_green_desaturate:
-            frame, changed = green_desaturate_image(frame)
-            postprocess_changed["green_desaturate"] += changed
+        if batch_background_to_black:
+            frame, changed = background_to_black_image(frame, key_rgb)
+            postprocess_changed["background_to_black"] += changed
+        if batch_background_desaturate:
+            frame, changed = background_desaturate_image(frame, key_rgb)
+            postprocess_changed["background_desaturate"] += changed
         if batch_semitransparent_to_black:
             frame, changed = semitransparent_to_black_image(frame)
             postprocess_changed["semitransparent_to_black"] += changed
@@ -2817,8 +2843,10 @@ def process_video_to_job(
             "halo_pixels": halo_pixels,
             "corridorkey_enabled": matte_info["corridorkey_enabled"],
             "corridorkey_screen": matte_info["corridorkey_screen_color"],
-            "batch_green_to_black": bool(batch_green_to_black),
-            "batch_green_desaturate": bool(batch_green_desaturate),
+            "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
+            "preprocess_esr": preprocess_esr_info,
+            "batch_background_to_black": bool(batch_background_to_black),
+            "batch_background_desaturate": bool(batch_background_desaturate),
             "batch_semitransparent_to_black": bool(batch_semitransparent_to_black),
             "batch_semitransparent_to_opaque": bool(batch_semitransparent_to_opaque),
             "postprocess_changed_pixels": postprocess_changed,
@@ -2851,36 +2879,74 @@ def save_preview_manifest(preview_id: str, manifest: dict) -> None:
     (root / "preview.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def is_green_residue_pixel(
+def is_background_residue_pixel(
     r_value: int,
     g_value: int,
     b_value: int,
     alpha: int,
+    key_rgb: tuple[int, int, int],
     threshold: int,
     dominance: int,
     alpha_floor: int,
 ) -> bool:
-    if alpha < alpha_floor:
+    # Background spill is only actionable on the matte edge. Fully opaque pixels
+    # belong to the retained subject, even when they match the screen color.
+    if alpha < alpha_floor or alpha >= 255:
         return False
 
-    raw_green_excess = g_value - max(r_value, b_value)
-    is_raw_green = g_value >= threshold and raw_green_excess >= dominance
-    if is_raw_green:
-        return True
+    key_channels = tuple(clamp_int(int(value), 0, 255) for value in key_rgb)
+    key_max = max(key_channels)
+    key_min = min(key_channels)
+    key_chroma = key_max - key_min
 
+    def matches(candidate: tuple[int, int, int]) -> bool:
+        candidate_max = max(candidate)
+        candidate_min = min(candidate)
+        candidate_chroma = candidate_max - candidate_min
+
+        if key_chroma >= dominance:
+            if candidate_max < threshold or candidate_chroma < dominance:
+                return False
+            key_hue = colorsys.rgb_to_hsv(*(value / 255.0 for value in key_channels))[0]
+            candidate_hue = colorsys.rgb_to_hsv(*(value / 255.0 for value in candidate))[0]
+            hue_distance = abs(key_hue - candidate_hue)
+            hue_distance = min(hue_distance, 1.0 - hue_distance)
+            return hue_distance <= 0.125
+
+        if candidate_chroma > dominance:
+            return False
+        key_value = round(sum(key_channels) / 3)
+        candidate_value = round(sum(candidate) / 3)
+        return abs(candidate_value - key_value) <= max(12, threshold)
+
+    raw_rgb = (r_value, g_value, b_value)
     if alpha <= 0:
         return False
 
     alpha_scale = 255.0 / alpha
-    scaled_r = min(255, round(r_value * alpha_scale))
-    scaled_g = min(255, round(g_value * alpha_scale))
-    scaled_b = min(255, round(b_value * alpha_scale))
-    scaled_green_excess = scaled_g - max(scaled_r, scaled_b)
-    return scaled_g >= threshold and scaled_green_excess >= dominance
+    straight_rgb = tuple(
+        min(255, round(value * alpha_scale))
+        for value in raw_rgb
+    )
+    raw_matches = matches(raw_rgb)
+    straight_matches = matches(straight_rgb)
+    if key_chroma < dominance:
+        raw_chroma = max(raw_rgb) - min(raw_rgb)
+        straight_chroma = max(straight_rgb) - min(straight_rgb)
+        return raw_chroma <= dominance and straight_chroma <= dominance and (raw_matches or straight_matches)
+    return raw_matches or straight_matches
 
 
-def green_to_black_image(
+def background_edge_candidate_mask(image: Image.Image, radius: int = 2) -> Image.Image:
+    alpha = image.convert("RGBA").getchannel("A")
+    transparent = alpha.point(lambda value: 255 if value == 0 else 0)
+    radius = max(1, int(radius))
+    return transparent.filter(ImageFilter.MaxFilter(radius * 2 + 1))
+
+
+def background_to_black_image(
     image: Image.Image,
+    key_rgb: tuple[int, int, int],
     threshold: int = 42,
     dominance: int = 24,
     alpha_floor: int = 1,
@@ -2891,9 +2957,22 @@ def green_to_black_image(
     threshold = max(0, min(255, int(threshold)))
     dominance = max(0, min(255, int(dominance)))
     alpha_floor = max(0, min(255, int(alpha_floor)))
+    edge_candidates = background_edge_candidate_mask(rgba)
 
-    for r_value, g_value, b_value, alpha in rgba.getdata():
-        if is_green_residue_pixel(r_value, g_value, b_value, alpha, threshold, dominance, alpha_floor):
+    for (r_value, g_value, b_value, alpha), is_background_edge in zip(
+        rgba.getdata(),
+        edge_candidates.getdata(),
+    ):
+        if is_background_edge and is_background_residue_pixel(
+            r_value,
+            g_value,
+            b_value,
+            alpha,
+            key_rgb,
+            threshold,
+            dominance,
+            alpha_floor,
+        ):
             output_pixels.append((0, 0, 0, alpha))
             changed += 1
         else:
@@ -2904,8 +2983,9 @@ def green_to_black_image(
     return cleaned, changed
 
 
-def green_desaturate_image(
+def background_desaturate_image(
     image: Image.Image,
+    key_rgb: tuple[int, int, int],
     threshold: int = 42,
     dominance: int = 24,
     alpha_floor: int = 1,
@@ -2916,9 +2996,22 @@ def green_desaturate_image(
     threshold = max(0, min(255, int(threshold)))
     dominance = max(0, min(255, int(dominance)))
     alpha_floor = max(0, min(255, int(alpha_floor)))
+    edge_candidates = background_edge_candidate_mask(rgba)
 
-    for r_value, g_value, b_value, alpha in rgba.getdata():
-        if is_green_residue_pixel(r_value, g_value, b_value, alpha, threshold, dominance, alpha_floor):
+    for (r_value, g_value, b_value, alpha), is_background_edge in zip(
+        rgba.getdata(),
+        edge_candidates.getdata(),
+    ):
+        if is_background_edge and is_background_residue_pixel(
+            r_value,
+            g_value,
+            b_value,
+            alpha,
+            key_rgb,
+            threshold,
+            dominance,
+            alpha_floor,
+        ):
             gray = clamp_int(round(0.299 * r_value + 0.587 * g_value + 0.114 * b_value), 0, 255)
             output_pixels.append((gray, gray, gray, alpha))
             changed += 1
@@ -2930,7 +3023,14 @@ def green_desaturate_image(
     return cleaned, changed
 
 
-def green_to_black_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
+def preview_background_key_rgb(preview: dict) -> tuple[int, int, int]:
+    try:
+        return parse_hex_color(str(preview.get("key_color") or "#00FF00"))
+    except ValueError:
+        return (0, 255, 0)
+
+
+def background_to_black_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
     preview = load_preview_manifest(preview_id)
     root = preview_dir(preview["preview_id"])
     processed_path = root / "processed.png"
@@ -2938,24 +3038,31 @@ def green_to_black_preview(preview_id: str, threshold: int = 42, dominance: int 
         raise FileNotFoundError(f"processed preview missing: {processed_path}")
 
     image = open_rgba_image(processed_path)
-    cleaned, changed = green_to_black_image(image, threshold=threshold, dominance=dominance)
+    key_rgb = preview_background_key_rgb(preview)
+    cleaned, changed = background_to_black_image(
+        image,
+        key_rgb,
+        threshold=threshold,
+        dominance=dominance,
+    )
     image.close()
     cleaned.save(processed_path)
     cleaned.close()
 
     postprocess = preview.setdefault("postprocess", {})
-    green_black = postprocess.setdefault("green_to_black", {})
-    green_black["enabled"] = True
-    green_black["threshold"] = max(0, min(255, int(threshold)))
-    green_black["dominance"] = max(0, min(255, int(dominance)))
-    green_black["changed_pixels"] = changed
-    green_black["updated_at"] = iso_now()
+    background_black = postprocess.setdefault("background_to_black", {})
+    background_black["enabled"] = True
+    background_black["key_color"] = rgb_to_hex(key_rgb)
+    background_black["threshold"] = max(0, min(255, int(threshold)))
+    background_black["dominance"] = max(0, min(255, int(dominance)))
+    background_black["changed_pixels"] = changed
+    background_black["updated_at"] = iso_now()
     preview["processed_url"] = f"/work/previews/{preview['preview_id']}/processed.png?ts={int(time.time() * 1000)}"
     save_preview_manifest(preview["preview_id"], preview)
     return preview
 
 
-def green_desaturate_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
+def background_desaturate_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
     preview = load_preview_manifest(preview_id)
     root = preview_dir(preview["preview_id"])
     processed_path = root / "processed.png"
@@ -2963,21 +3070,46 @@ def green_desaturate_preview(preview_id: str, threshold: int = 42, dominance: in
         raise FileNotFoundError(f"processed preview missing: {processed_path}")
 
     image = open_rgba_image(processed_path)
-    cleaned, changed = green_desaturate_image(image, threshold=threshold, dominance=dominance)
+    key_rgb = preview_background_key_rgb(preview)
+    cleaned, changed = background_desaturate_image(
+        image,
+        key_rgb,
+        threshold=threshold,
+        dominance=dominance,
+    )
     image.close()
     cleaned.save(processed_path)
     cleaned.close()
 
     postprocess = preview.setdefault("postprocess", {})
-    green_desaturate = postprocess.setdefault("green_desaturate", {})
-    green_desaturate["enabled"] = True
-    green_desaturate["threshold"] = max(0, min(255, int(threshold)))
-    green_desaturate["dominance"] = max(0, min(255, int(dominance)))
-    green_desaturate["changed_pixels"] = changed
-    green_desaturate["updated_at"] = iso_now()
+    background_desaturate = postprocess.setdefault("background_desaturate", {})
+    background_desaturate["enabled"] = True
+    background_desaturate["key_color"] = rgb_to_hex(key_rgb)
+    background_desaturate["threshold"] = max(0, min(255, int(threshold)))
+    background_desaturate["dominance"] = max(0, min(255, int(dominance)))
+    background_desaturate["changed_pixels"] = changed
+    background_desaturate["updated_at"] = iso_now()
     preview["processed_url"] = f"/work/previews/{preview['preview_id']}/processed.png?ts={int(time.time() * 1000)}"
     save_preview_manifest(preview["preview_id"], preview)
     return preview
+
+
+def green_to_black_image(
+    image: Image.Image,
+    threshold: int = 42,
+    dominance: int = 24,
+    alpha_floor: int = 1,
+) -> tuple[Image.Image, int]:
+    return background_to_black_image(image, (0, 255, 0), threshold, dominance, alpha_floor)
+
+
+def green_desaturate_image(
+    image: Image.Image,
+    threshold: int = 42,
+    dominance: int = 24,
+    alpha_floor: int = 1,
+) -> tuple[Image.Image, int]:
+    return background_desaturate_image(image, (0, 255, 0), threshold, dominance, alpha_floor)
 
 
 def semitransparent_to_black_image(
@@ -3101,11 +3233,14 @@ def preview_frame(
     luma_polarity: str,
     corridorkey_enabled: bool,
     corridorkey_screen: str,
-    batch_green_to_black: bool = False,
-    batch_green_desaturate: bool = False,
+    preprocess_esr_smoothing: bool = False,
+    batch_background_to_black: bool = False,
+    batch_background_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
     batch_semitransparent_to_opaque: bool = False,
 ) -> dict:
+    if preprocess_esr_smoothing:
+        require_realesrgan_smoothing_ready()
     source_path, media_type = source_media_entry(upload_id)
     info = upload_media_info(upload_id, source_path, media_type)
     reduce_px, canvas_mode = effective_canvas_settings(media_type, reduce_px, canvas_mode)
@@ -3142,6 +3277,20 @@ def preview_frame(
     target_size = target_size_from_source_height(raw_image.height, output_scale)
 
     raw_image.save(source_preview_path)
+
+    preprocess_esr_info = {
+        "enabled": False,
+        "model": "",
+        "upscale": 1,
+        "restored_to_source_size": False,
+        "frame_count": 0,
+    }
+    if preprocess_esr_smoothing:
+        smoothed_frames, preprocess_esr_info = preprocess_frames_with_realesrgan_smoothing(
+            [raw_image],
+            root / "esr-smoothing",
+        )
+        raw_image = smoothed_frames[0]
 
     keyed_frames, key_rgb, matte_info = apply_matte_pipeline(
         raw_images=[raw_image],
@@ -3183,17 +3332,17 @@ def preview_frame(
         )
     rendered_frame = rendered_frames[0]
     postprocess_changed = {
-        "green_to_black": 0,
-        "green_desaturate": 0,
+        "background_to_black": 0,
+        "background_desaturate": 0,
         "semitransparent_to_black": 0,
         "semitransparent_to_opaque": 0,
     }
-    if batch_green_to_black:
-        rendered_frame, changed = green_to_black_image(rendered_frame)
-        postprocess_changed["green_to_black"] += changed
-    if batch_green_desaturate:
-        rendered_frame, changed = green_desaturate_image(rendered_frame)
-        postprocess_changed["green_desaturate"] += changed
+    if batch_background_to_black:
+        rendered_frame, changed = background_to_black_image(rendered_frame, key_rgb)
+        postprocess_changed["background_to_black"] += changed
+    if batch_background_desaturate:
+        rendered_frame, changed = background_desaturate_image(rendered_frame, key_rgb)
+        postprocess_changed["background_desaturate"] += changed
     if batch_semitransparent_to_black:
         rendered_frame, changed = semitransparent_to_black_image(rendered_frame)
         postprocess_changed["semitransparent_to_black"] += changed
@@ -3234,8 +3383,10 @@ def preview_frame(
             "halo_pixels": halo_pixels,
             "corridorkey_enabled": matte_info["corridorkey_enabled"],
             "corridorkey_screen": matte_info["corridorkey_screen_color"],
-            "batch_green_to_black": bool(batch_green_to_black),
-            "batch_green_desaturate": bool(batch_green_desaturate),
+            "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
+            "preprocess_esr": preprocess_esr_info,
+            "batch_background_to_black": bool(batch_background_to_black),
+            "batch_background_desaturate": bool(batch_background_desaturate),
             "batch_semitransparent_to_black": bool(batch_semitransparent_to_black),
             "batch_semitransparent_to_opaque": bool(batch_semitransparent_to_opaque),
             "postprocess_changed_pixels": postprocess_changed,
@@ -3504,6 +3655,96 @@ def resolve_realesrgan_model_dir(binary: str | None = None) -> Path | None:
     return None
 
 
+def realesrgan_install_target_dir() -> Path:
+    return WORK_DIR / "tools" / "realesrgan-ncnn-vulkan"
+
+
+def realesrgan_install_status() -> dict:
+    binary = resolve_realesrgan_binary()
+    model_dir = resolve_realesrgan_model_dir(binary)
+    missing = []
+    if not binary:
+        missing.append("realesrgan-ncnn-vulkan.exe")
+    if not model_dir:
+        missing.extend(
+            [
+                f"models/{REAL_ESRGAN_ANIME_MODEL}.param",
+                f"models/{REAL_ESRGAN_ANIME_MODEL}.bin",
+            ]
+        )
+    return {
+        "installed": bool(binary and model_dir),
+        "binary": binary or "",
+        "model_dir": str(model_dir) if model_dir else "",
+        "target_dir": str(realesrgan_install_target_dir()),
+        "missing": missing,
+    }
+
+
+def download_realesrgan_windows_package(destination: Path) -> None:
+    request = Request(
+        REAL_ESRGAN_WINDOWS_PACKAGE_URL,
+        headers={"User-Agent": "Sprite-Video-Lab/Real-ESRGAN-Installer"},
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with urlopen(request, timeout=120) as response, destination.open("wb") as output:
+        shutil.copyfileobj(response, output)
+
+
+def extract_realesrgan_package(package_path: Path, extract_dir: Path) -> Path:
+    extract_root = extract_dir.resolve()
+    with zipfile.ZipFile(package_path) as archive:
+        for member in archive.infolist():
+            target = (extract_root / member.filename).resolve()
+            if target != extract_root and extract_root not in target.parents:
+                raise RuntimeError("Real-ESRGAN 安装包包含不安全路径，已停止安装。")
+        archive.extractall(extract_root)
+
+    executable_paths = list(extract_root.rglob("realesrgan-ncnn-vulkan.exe"))
+    if len(executable_paths) != 1:
+        raise RuntimeError("Real-ESRGAN 安装包中没有找到唯一的 Windows 可执行文件。")
+    package_root = executable_paths[0].parent
+    model_dir = package_root / "models"
+    required_models = (
+        model_dir / f"{REAL_ESRGAN_ANIME_MODEL}.param",
+        model_dir / f"{REAL_ESRGAN_ANIME_MODEL}.bin",
+    )
+    if not all(path.is_file() and path.stat().st_size > 0 for path in required_models):
+        raise RuntimeError("Real-ESRGAN 安装包缺少 anime 模型文件。")
+    return package_root
+
+
+def install_realesrgan_runtime(confirmed: bool) -> dict:
+    if confirmed is not True:
+        raise ValueError("必须确认后才能下载并安装 Real-ESRGAN。")
+
+    with _REALESRGAN_INSTALL_LOCK:
+        current_status = realesrgan_install_status()
+        if current_status["installed"]:
+            return {"downloaded": False, "status": current_status}
+
+        target_dir = realesrgan_install_target_dir()
+        tools_dir = target_dir.parent
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".realesrgan-install-", dir=tools_dir) as temp_dir:
+            temp_root = Path(temp_dir)
+            package_path = temp_root / "realesrgan-windows.zip"
+            extract_dir = temp_root / "extracted"
+            extract_dir.mkdir()
+            download_realesrgan_windows_package(package_path)
+            package_root = extract_realesrgan_package(package_path, extract_dir)
+            shutil.copytree(package_root, target_dir, dirs_exist_ok=True)
+
+        status = realesrgan_install_status()
+        if not status["installed"]:
+            raise RuntimeError("Real-ESRGAN 安装未完成，请检查网络和磁盘空间后重试。")
+        return {
+            "downloaded": True,
+            "source": REAL_ESRGAN_WINDOWS_PACKAGE_URL,
+            "status": status,
+        }
+
+
 def realesrgan_missing_message() -> str:
     return (
         "Real-ESRGAN anime is not ready. Expected "
@@ -3701,11 +3942,131 @@ def run_realesrgan_anime(input_path: Path, output_path: Path, output_scale: int 
         raise RuntimeError("Real-ESRGAN anime did not produce an output image")
 
 
+def require_realesrgan_smoothing_ready() -> None:
+    binary = resolve_realesrgan_binary()
+    if not binary or not resolve_realesrgan_model_dir(binary):
+        raise RuntimeError(
+            "“先做平滑处理”需要 Real-ESRGAN anime，当前没有找到可执行文件或模型。"
+            "请重新勾选该选项并确认自动安装。"
+        )
+
+
+def smooth_source_frame_with_realesrgan(
+    image: Image.Image,
+    ai_input_path: Path,
+    ai_output_path: Path,
+    restored_path: Path | None = None,
+) -> Image.Image:
+    source_rgba = image.convert("RGBA")
+    source_size = source_rgba.size
+    ai_input_path.parent.mkdir(parents=True, exist_ok=True)
+    ai_output_path.parent.mkdir(parents=True, exist_ok=True)
+    prepare_realesrgan_rgb_input(source_rgba).save(ai_input_path)
+    run_realesrgan_anime(
+        ai_input_path,
+        ai_output_path,
+        output_scale=MAGIC_UPSCALE,
+    )
+
+    with Image.open(ai_output_path) as upscaled_image:
+        restored_rgb = upscaled_image.convert("RGB").resize(source_size, LANCZOS)
+    alpha = source_rgba.getchannel("A")
+    restored = Image.merge("RGBA", (*restored_rgb.split(), alpha))
+    if restored_path is not None:
+        restored_path.parent.mkdir(parents=True, exist_ok=True)
+        restored.save(restored_path, optimize=True, compress_level=9)
+    return restored
+
+
+def preprocess_frames_with_realesrgan_smoothing(
+    frames: list[Image.Image],
+    root: Path,
+) -> tuple[list[Image.Image], dict]:
+    require_realesrgan_smoothing_ready()
+    ai_input_dir = root / "ai-input"
+    ai_output_dir = root / "ai-output"
+    restored_dir = root / "restored"
+    smoothed_frames: list[Image.Image] = []
+    for index, frame in enumerate(frames, start=1):
+        frame_name = f"frame_{index:05d}.png"
+        smoothed_frames.append(
+            smooth_source_frame_with_realesrgan(
+                frame,
+                ai_input_dir / frame_name,
+                ai_output_dir / frame_name,
+                restored_dir / frame_name,
+            )
+        )
+    return smoothed_frames, {
+        "enabled": True,
+        "model": REAL_ESRGAN_ANIME_MODEL,
+        "upscale": MAGIC_UPSCALE,
+        "restored_to_source_size": True,
+        "frame_count": len(smoothed_frames),
+        "root": str(root),
+    }
+
+
 def resolve_magic_variant_dir(manifest: dict, variant: dict) -> Path:
     source_dir = Path(str(variant.get("frames_dir") or ""))
     if not source_dir.is_absolute():
         source_dir = MAGIC_DIR / f"{manifest['magic_id']}-magic" / str(source_dir)
     return source_dir
+
+
+def normalize_magic_variant_keys(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    available = {str(variant["key"]) for variant in MAGIC_VARIANTS}
+    if values is None:
+        return [str(variant["key"]) for variant in MAGIC_VARIANTS]
+    requested = [str(value or "").strip().lower() for value in (values or [])]
+    normalized: list[str] = []
+    for key in requested:
+        if key in available and key not in normalized:
+            normalized.append(key)
+    return normalized or ["half"]
+
+
+def magic_esr_cache_path(job_id: str, frame_index: int) -> Path:
+    safe_job_id = str(job_id or "").strip()
+    if not safe_job_id or Path(safe_job_id).name != safe_job_id:
+        raise ValueError("invalid job id for ESR cache")
+    return (
+        MAGIC_DIR
+        / "_esr-cache"
+        / safe_job_id
+        / REAL_ESRGAN_ANIME_MODEL
+        / f"source_{frame_index + 1:06d}.png"
+    )
+
+
+def load_magic_esr_cache(job_id: str, frame_index: int, source_size: tuple[int, int]) -> Image.Image | None:
+    cache_path = magic_esr_cache_path(job_id, frame_index)
+    if not cache_path.is_file():
+        return None
+    try:
+        with Image.open(cache_path) as cached:
+            rgba = cached.convert("RGBA")
+        expected_size = (source_size[0] * MAGIC_UPSCALE, source_size[1] * MAGIC_UPSCALE)
+        if rgba.size != expected_size:
+            rgba.close()
+            return None
+        return rgba
+    except (OSError, ValueError):
+        return None
+
+
+def save_magic_esr_cache(job_id: str, frame_index: int, image: Image.Image) -> Path:
+    cache_path = magic_esr_cache_path(job_id, frame_index)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(cache_path, optimize=False, compress_level=6)
+    return cache_path
+
+
+def link_or_copy_file(source_path: Path, target_path: Path) -> None:
+    try:
+        os.link(source_path, target_path)
+    except OSError:
+        shutil.copy2(source_path, target_path)
 
 
 def find_cached_magic_frames(
@@ -3751,39 +4112,23 @@ def find_cached_magic_frames(
         if normalize_magic_resize_mode(manifest.get("resize_mode")) != resize_mode:
             continue
 
-        variant_sources: dict[str, dict[int, dict]] = {}
         for variant_config in MAGIC_VARIANTS:
-            variant = magic_manifest_variant(manifest, str(variant_config["key"]))
+            variant_key = str(variant_config["key"])
+            if variant_key not in (manifest.get("variants") or {}):
+                continue
+            variant = magic_manifest_variant(manifest, variant_key)
             source_dir = resolve_magic_variant_dir(manifest, variant)
-            entries: dict[int, dict] = {}
             for entry in variant.get("frames") or []:
                 source_index = safe_int(entry.get("source_index"), -1)
                 source_path = source_dir / str(entry.get("name") or "")
-                if source_index >= 0 and source_path.exists():
-                    entries[source_index] = {
-                        "entry": entry,
-                        "path": source_path,
-                    }
-            variant_sources[str(variant_config["key"])] = entries
-
-        primary_entries = variant_sources.get(str(MAGIC_VARIANTS[0]["key"]), {})
-        for source_index in primary_entries:
-            if source_index in cache:
-                continue
-            cached_variants = {}
-            for variant_config in MAGIC_VARIANTS:
-                variant_key = str(variant_config["key"])
-                cached = variant_sources.get(variant_key, {}).get(source_index)
-                if not cached:
-                    break
-                cached_variants[variant_key] = cached
-            else:
-                if source_alpha_by_index.get(source_index) and any(
-                    not image_path_has_visible_alpha(cached["path"])
-                    for cached in cached_variants.values()
-                ):
+                if source_index < 0 or not source_path.exists():
                     continue
-                cache[source_index] = cached_variants
+                if source_alpha_by_index.get(source_index) and not image_path_has_visible_alpha(source_path):
+                    continue
+                cache.setdefault(source_index, {}).setdefault(
+                    variant_key,
+                    {"entry": entry, "path": source_path},
+                )
     return cache
 
 
@@ -4119,10 +4464,20 @@ def magic_preview_job(
     selected_indices: list[int],
     resize_mode: str = MAGIC_RESIZE_MODE_DEFAULT,
     use_realesrgan: bool = True,
+    variant_keys: list[str] | None = None,
 ) -> dict:
     resize_mode = normalize_magic_resize_mode(resize_mode)
     resize_mode_label = str(MAGIC_RESIZE_MODES[resize_mode]["label"])
     use_realesrgan = bool(use_realesrgan)
+    requested_variant_keys = normalize_magic_variant_keys(variant_keys)
+    if "full" in requested_variant_keys and not use_realesrgan:
+        if variant_keys is None:
+            requested_variant_keys = [key for key in requested_variant_keys if key != "full"]
+        else:
+            raise ValueError("100% scale-processing variant requires Real-ESRGAN")
+    variant_configs = [
+        variant for variant in MAGIC_VARIANTS if str(variant["key"]) in requested_variant_keys
+    ]
     model_name = REAL_ESRGAN_ANIME_MODEL if use_realesrgan else "none"
     manifest = load_job_manifest(job_id)
     processed_dir = job_dir(job_id) / "processed"
@@ -4134,7 +4489,7 @@ def magic_preview_job(
             indices.append(index)
             seen_indices.add(index)
     if not indices:
-        raise ValueError("no frames selected for MAGIC")
+        raise ValueError("no frames selected for scale processing")
 
     if use_realesrgan:
         binary = resolve_realesrgan_binary()
@@ -4146,7 +4501,7 @@ def magic_preview_job(
     ai_input_dir = root / "ai-input"
     ai_output_dir = root / "ai-output"
     variants: dict[str, dict] = {}
-    for variant in MAGIC_VARIANTS:
+    for variant in variant_configs:
         frames_dir = root / str(variant["dir"])
         variants[str(variant["key"])] = {
             "key": str(variant["key"]),
@@ -4166,6 +4521,10 @@ def magic_preview_job(
     cached_magic = find_cached_magic_frames(job_id, resize_mode, use_realesrgan)
     generated_count = 0
     reused_count = 0
+    generated_variant_count = 0
+    reused_variant_count = 0
+    esr_generated_count = 0
+    esr_reused_count = 0
     for output_index, frame_index in enumerate(indices, start=1):
         entry = frame_map[frame_index]
         source_path = processed_dir / entry["name"]
@@ -4173,15 +4532,16 @@ def magic_preview_job(
         ai_input_path = ai_input_dir / frame_name
         ai_output_path = ai_output_dir / frame_name
 
-        cached_variants = cached_magic.get(frame_index)
-        if cached_variants:
-            for variant in variants.values():
-                variant_key = str(variant["key"])
-                cached = cached_variants[variant_key]
+        cached_variants = cached_magic.get(frame_index, {})
+        missing_variant_keys: list[str] = []
+        for variant in variants.values():
+            variant_key = str(variant["key"])
+            cached = cached_variants.get(variant_key)
+            if cached:
                 cached_entry = cached["entry"]
                 frames_dir = Path(variant["frames_dir"])
                 processed_path = frames_dir / frame_name
-                shutil.copy2(cached["path"], processed_path)
+                link_or_copy_file(cached["path"], processed_path)
                 processed_bytes = processed_path.stat().st_size
                 frame_width = safe_int(cached_entry.get("width"), 0)
                 frame_height = safe_int(cached_entry.get("height"), 0)
@@ -4205,19 +4565,36 @@ def magic_preview_job(
                         "cached": True,
                     }
                 )
+                reused_variant_count += 1
+            else:
+                missing_variant_keys.append(variant_key)
+
+        if not missing_variant_keys:
             reused_count += 1
             continue
 
         with Image.open(source_path) as image:
             source_rgba = image.convert("RGBA")
         if use_realesrgan:
-            upscaled_frame, source_size = build_magic_upscaled_frame(source_rgba, ai_input_path, ai_output_path)
+            source_size = source_rgba.size
+            upscaled_frame = load_magic_esr_cache(job_id, frame_index, source_size)
+            if upscaled_frame is None:
+                try:
+                    upscaled_frame, source_size = build_magic_upscaled_frame(source_rgba, ai_input_path, ai_output_path)
+                    save_magic_esr_cache(job_id, frame_index, upscaled_frame)
+                    esr_generated_count += 1
+                finally:
+                    ai_input_path.unlink(missing_ok=True)
+                    ai_output_path.unlink(missing_ok=True)
+            else:
+                esr_reused_count += 1
         else:
             source_size = source_rgba.size
             upscaled_frame = source_rgba.copy()
         generated_count += 1
 
-        for variant in variants.values():
+        for variant_key in missing_variant_keys:
+            variant = variants[variant_key]
             frames_dir = Path(variant["frames_dir"])
             processed_path = frames_dir / frame_name
             magic_frame = resize_magic_frame(
@@ -4246,11 +4623,15 @@ def magic_preview_job(
                 }
             )
             magic_frame.close()
+            generated_variant_count += 1
 
         source_rgba.close()
         upscaled_frame.close()
 
-    primary = variants["half"]
+    primary_key = "half" if "half" in variants else requested_variant_keys[0]
+    primary = variants[primary_key]
+    shutil.rmtree(ai_input_dir, ignore_errors=True)
+    shutil.rmtree(ai_output_dir, ignore_errors=True)
 
     result = {
         "magic_id": magic_id,
@@ -4258,7 +4639,7 @@ def magic_preview_job(
         "model": model_name,
         "use_realesrgan": use_realesrgan,
         "upscale": MAGIC_UPSCALE if use_realesrgan else 1,
-        "final_scale": 0.5,
+        "final_scale": float(primary["scale"]),
         "resize_mode": resize_mode,
         "resize_mode_label": resize_mode_label,
         "output_dir": str(root),
@@ -4269,8 +4650,13 @@ def magic_preview_job(
         "bytes": int(primary["bytes"]),
         "frames": primary["frames"],
         "variants": variants,
+        "variant_keys": requested_variant_keys,
         "generated_count": generated_count,
         "reused_count": reused_count,
+        "generated_variant_count": generated_variant_count,
+        "reused_variant_count": reused_variant_count,
+        "esr_generated_count": esr_generated_count,
+        "esr_reused_count": esr_reused_count,
         "created_at": iso_now(),
     }
     (root / "manifest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -4280,10 +4666,10 @@ def magic_preview_job(
 def load_magic_manifest(magic_id: str) -> dict:
     magic_id = str(magic_id or "").strip()
     if not magic_id or Path(magic_id).name != magic_id:
-        raise ValueError("invalid MAGIC id")
+        raise ValueError("invalid scale-processing id")
     path = MAGIC_DIR / f"{magic_id}-magic" / "manifest.json"
     if not path.exists():
-        raise FileNotFoundError(f"MAGIC result not found: {magic_id}")
+        raise FileNotFoundError(f"scale-processing result not found: {magic_id}")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -4307,111 +4693,40 @@ def export_magic_frames(
     magic_id: str,
     variant_key: str = "half",
     video_duration_ms: int = 100,
+    export_format: str = "frames",
 ) -> dict:
+    export_format = normalize_export_format(export_format)
     manifest = load_magic_manifest(magic_id)
-    job_manifest = load_job_manifest(str(manifest.get("job_id") or ""))
-    job_frame_sizes = {
-        entry["index"]: (
-            safe_int(entry.get("width"), 0),
-            safe_int(entry.get("height"), 0),
-        )
-        for entry in job_manifest.get("frames") or []
-    }
+    manifest_variants = manifest.get("variants") or {}
+    if variant_key != "half" and variant_key not in manifest_variants:
+        raise ValueError(f"scale variant not found: {variant_key}")
     variant = magic_manifest_variant(manifest, variant_key)
     source_dir = resolve_magic_variant_dir(manifest, variant)
     if not source_dir.exists():
-        raise FileNotFoundError(f"MAGIC frames not found: {manifest['magic_id']}")
+        raise FileNotFoundError(f"scale-processed frames not found: {manifest['magic_id']}")
 
     variant_key = str(variant.get("key") or "half")
-    target_dir = configured_exports_dir() / f"{timestamped_id()}-magic-{variant_key}-frames"
-    frames_dir = target_dir / "frames"
-    sheet_dir = target_dir / "sprite-sheet"
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    sheet_dir.mkdir(parents=True, exist_ok=True)
-
-    copied_count = 0
-    copied_paths: list[Path] = []
-    mov_frame_sizes: list[tuple[int, int]] = []
-    for output_index, entry in enumerate(variant.get("frames") or [], start=1):
+    target_dir = configured_exports_dir() / f"{timestamped_id()}-scale-{variant_key}-{export_format}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    source_paths: list[Path] = []
+    source_indices: list[int] = []
+    for entry in variant.get("frames") or []:
         source_path = source_dir / str(entry.get("name") or "")
         if not source_path.exists():
             continue
-        target_path = frames_dir / f"frame_{output_index:03d}.png"
-        shutil.copy2(source_path, target_path)
-        copied_count += 1
-        copied_paths.append(target_path)
-        source_size = job_frame_sizes.get(safe_int(entry.get("source_index"), -1))
-        if not source_size or source_size[0] <= 0 or source_size[1] <= 0:
-            source_size = (
-                max(1, round(safe_int(entry.get("width"), 1) / max(float(variant.get("scale") or 1), 0.0001))),
-                max(1, round(safe_int(entry.get("height"), 1) / max(float(variant.get("scale") or 1), 0.0001))),
-            )
-        mov_frame_sizes.append(source_size)
+        source_index = safe_int(entry.get("source_index"), -1)
+        source_paths.append(source_path)
+        source_indices.append(source_index)
 
-    if copied_count <= 0:
-        raise ValueError("no MAGIC frames exported")
-
-    cell_width = 0
-    cell_height = 0
-    frame_sizes: list[tuple[int, int]] = []
-    for frame_path in copied_paths:
-        frame = open_rgba_image(frame_path)
-        frame_sizes.append(frame.size)
-        cell_width = max(cell_width, frame.size[0])
-        cell_height = max(cell_height, frame.size[1])
-        frame.close()
+    if not source_paths:
+        raise ValueError("no scale-processed frames exported")
 
     video_duration_ms = clamp_int(video_duration_ms, 20, 5000)
-    timestamp = f"{datetime.now():%Y%m%d-%H%M%S}"
-    mov_name = f"magic-{variant_key}-{timestamp}.mov"
-    gif_name = f"magic-{variant_key}-{timestamp}.gif"
-    sheet_name = "sheet.png"
-    sheet_json_name = "sheet.json"
-    mov_cell_width = max(width for width, _height in mov_frame_sizes)
-    mov_cell_height = max(height for _width, height in mov_frame_sizes)
-    save_alpha_mov(
-        copied_paths,
-        frame_sizes,
-        target_dir / mov_name,
-        mov_cell_width,
-        mov_cell_height,
-        video_duration_ms,
-        render_sizes=mov_frame_sizes,
-    )
-    save_gif(copied_paths, frame_sizes, target_dir / gif_name, cell_width, cell_height, video_duration_ms)
-    sheet_metadata = save_sprite_sheet(
-        copied_paths,
-        frame_sizes,
-        sheet_dir / sheet_name,
-        sheet_dir / sheet_json_name,
-        cell_width,
-        cell_height,
-        video_duration_ms,
-    )
-
     result = {
+        "export_format": export_format,
         "output_dir": str(target_dir),
-        "frames_dir": str(frames_dir),
-        "sheet_dir": str(sheet_dir),
-        "video_name": mov_name,
-        "video_url": export_url(target_dir, mov_name),
-        "mov_name": mov_name,
-        "mov_url": export_url(target_dir, mov_name),
-        "gif_name": gif_name,
-        "gif_url": export_url(target_dir, gif_name),
-        "sheet_name": sheet_name,
-        "sheet_url": export_url(target_dir, f"sprite-sheet/{sheet_name}"),
-        "sheet_json_name": sheet_json_name,
-        "sheet_json_url": export_url(target_dir, f"sprite-sheet/{sheet_json_name}"),
-        "sheet_columns": sheet_metadata["columns"],
-        "sheet_rows": sheet_metadata["rows"],
-        "sheet_width": sheet_metadata["width"],
-        "sheet_height": sheet_metadata["height"],
-        "frame_count": copied_count,
-        "max_width": mov_cell_width,
-        "max_height": mov_cell_height,
-        "gif_width": variant.get("max_width") or 0,
-        "gif_height": variant.get("max_height") or 0,
+        "frame_count": len(source_paths),
+        "frame_duration_ms": video_duration_ms,
         "video_duration_ms": video_duration_ms,
         "source_magic_id": manifest.get("magic_id") or magic_id,
         "variant_key": variant_key,
@@ -4425,6 +4740,94 @@ def export_magic_frames(
         "resize_mode_label": manifest.get("resize_mode_label") or MAGIC_RESIZE_MODES[MAGIC_RESIZE_MODE_DEFAULT]["label"],
         "created_at": iso_now(),
     }
+
+    if export_format == "frames":
+        frames_dir = target_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        frame_metadata = []
+        for output_index, (source_index, source_path) in enumerate(zip(source_indices, source_paths), start=1):
+            target_path = frames_dir / f"frame_{output_index:03d}.png"
+            shutil.copy2(source_path, target_path)
+            frame_metadata.append(
+                {
+                    "index": output_index - 1,
+                    "source_index": source_index,
+                    "file": target_path.name,
+                    "duration_ms": video_duration_ms,
+                }
+            )
+        frames_json_name = "frames.json"
+        (frames_dir / frames_json_name).write_text(
+            json.dumps(
+                {
+                    "format": "frame-sequence",
+                    "frame_count": len(frame_metadata),
+                    "frame_duration_ms": video_duration_ms,
+                    "total_duration_ms": len(frame_metadata) * video_duration_ms,
+                    "frames": frame_metadata,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        result.update({"frames_dir": str(frames_dir), "frames_json_name": frames_json_name})
+        (target_dir / "export.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
+
+    cell_width = 0
+    cell_height = 0
+    frame_sizes: list[tuple[int, int]] = []
+    for frame_path in source_paths:
+        frame = open_rgba_image(frame_path)
+        frame_sizes.append(frame.size)
+        cell_width = max(cell_width, frame.size[0])
+        cell_height = max(cell_height, frame.size[1])
+        frame.close()
+
+    timestamp = f"{datetime.now():%Y%m%d-%H%M%S}"
+    if export_format == "mov":
+        mov_name = f"scale-{variant_key}-{timestamp}.mov"
+        save_alpha_mov(
+            source_paths,
+            frame_sizes,
+            target_dir / mov_name,
+            cell_width,
+            cell_height,
+            video_duration_ms,
+        )
+        result.update({"mov_name": mov_name, "mov_url": export_url(target_dir, mov_name)})
+    elif export_format == "gif":
+        gif_name = f"scale-{variant_key}-{timestamp}.gif"
+        save_gif(source_paths, frame_sizes, target_dir / gif_name, cell_width, cell_height, video_duration_ms)
+        result.update({"gif_name": gif_name, "gif_url": export_url(target_dir, gif_name)})
+    else:
+        sheet_dir = target_dir / "sprite-sheet"
+        sheet_dir.mkdir(parents=True, exist_ok=True)
+        sheet_name = "sheet.png"
+        sheet_json_name = "sheet.json"
+        sheet_metadata = save_sprite_sheet(
+            source_paths,
+            frame_sizes,
+            sheet_dir / sheet_name,
+            sheet_dir / sheet_json_name,
+            cell_width,
+            cell_height,
+            video_duration_ms,
+        )
+        result.update(
+            {
+                "sheet_dir": str(sheet_dir),
+                "sheet_name": sheet_name,
+                "sheet_url": export_url(target_dir, f"sprite-sheet/{sheet_name}"),
+                "sheet_json_name": sheet_json_name,
+                "sheet_json_url": export_url(target_dir, f"sprite-sheet/{sheet_json_name}"),
+                "sheet_columns": sheet_metadata["columns"],
+                "sheet_rows": sheet_metadata["rows"],
+                "sheet_width": sheet_metadata["width"],
+                "sheet_height": sheet_metadata["height"],
+            }
+        )
     (target_dir / "export.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
@@ -4642,6 +5045,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 self.send_json({"ok": True, "result": result})
                 return
+            if parsed.path == "/api/realesrgan-status":
+                self.read_json_body()
+                self.send_json({"ok": True, "status": realesrgan_install_status()})
+                return
+            if parsed.path == "/api/install-realesrgan":
+                payload = self.read_json_body()
+                result = install_realesrgan_runtime(payload.get("confirmed") is True)
+                self.send_json({"ok": True, "result": result})
+                return
             if parsed.path == "/api/clear-runtime-files":
                 payload = self.read_json_body()
                 result = clear_managed_runtime_files(payload.get("confirmed") is True)
@@ -4733,8 +5145,13 @@ class AppHandler(BaseHTTPRequestHandler):
                     luma_polarity=normalize_luma_polarity(str(payload.get("luma_polarity") or "auto")),
                     corridorkey_enabled=bool(payload.get("corridorkey_enabled", False)),
                     corridorkey_screen=normalize_corridorkey_screen(str(payload.get("corridorkey_screen") or "auto")),
-                    batch_green_to_black=bool(payload.get("batch_green_to_black", False)),
-                    batch_green_desaturate=bool(payload.get("batch_green_desaturate", False)),
+                    preprocess_esr_smoothing=bool(payload.get("preprocess_esr_smoothing", False)),
+                    batch_background_to_black=bool(
+                        payload.get("batch_background_to_black", payload.get("batch_green_to_black", False))
+                    ),
+                    batch_background_desaturate=bool(
+                        payload.get("batch_background_desaturate", payload.get("batch_green_desaturate", False))
+                    ),
                     batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
                     batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
                 )
@@ -4768,8 +5185,13 @@ class AppHandler(BaseHTTPRequestHandler):
                     luma_polarity=normalize_luma_polarity(str(payload.get("luma_polarity") or "auto")),
                     corridorkey_enabled=bool(payload.get("corridorkey_enabled", False)),
                     corridorkey_screen=normalize_corridorkey_screen(str(payload.get("corridorkey_screen") or "auto")),
-                    batch_green_to_black=bool(payload.get("batch_green_to_black", False)),
-                    batch_green_desaturate=bool(payload.get("batch_green_desaturate", False)),
+                    preprocess_esr_smoothing=bool(payload.get("preprocess_esr_smoothing", False)),
+                    batch_background_to_black=bool(
+                        payload.get("batch_background_to_black", payload.get("batch_green_to_black", False))
+                    ),
+                    batch_background_desaturate=bool(
+                        payload.get("batch_background_desaturate", payload.get("batch_green_desaturate", False))
+                    ),
                     batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
                     batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
                 )
@@ -4780,18 +5202,18 @@ class AppHandler(BaseHTTPRequestHandler):
                 result = save_preview_as_job(str(payload.get("preview_id") or ""))
                 self.send_json({"ok": True, "job": result})
                 return
-            if parsed.path == "/api/preview-green-to-black":
+            if parsed.path in {"/api/preview-background-to-black", "/api/preview-green-to-black"}:
                 payload = self.read_json_body()
-                result = green_to_black_preview(
+                result = background_to_black_preview(
                     str(payload.get("preview_id") or ""),
                     threshold=max(0, min(255, safe_int(payload.get("threshold"), 42))),
                     dominance=max(0, min(255, safe_int(payload.get("dominance"), 24))),
                 )
                 self.send_json({"ok": True, "preview": result})
                 return
-            if parsed.path == "/api/preview-green-desaturate":
+            if parsed.path in {"/api/preview-background-desaturate", "/api/preview-green-desaturate"}:
                 payload = self.read_json_body()
-                result = green_desaturate_preview(
+                result = background_desaturate_preview(
                     str(payload.get("preview_id") or ""),
                     threshold=max(0, min(255, safe_int(payload.get("threshold"), 42))),
                     dominance=max(0, min(255, safe_int(payload.get("dominance"), 24))),
@@ -4828,7 +5250,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/magic-preview":
                 if not MAGIC_PREVIEW_LOCK.acquire(blocking=False):
-                    self.send_error_json("MAGIC 正在处理，请等当前任务结束后再点。", HTTPStatus.CONFLICT)
+                    self.send_error_json("缩放处理正在进行，请等当前任务结束后再点。", HTTPStatus.CONFLICT)
                     return
                 payload = self.read_json_body()
                 try:
@@ -4837,6 +5259,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         selected_indices=[safe_int(value, -1) for value in (payload.get("selected_indices") or [])],
                         resize_mode=str(payload.get("resize_mode") or MAGIC_RESIZE_MODE_DEFAULT),
                         use_realesrgan=safe_bool(payload.get("use_realesrgan"), True),
+                        variant_keys=[str(value) for value in (payload.get("variant_keys") or [])],
                     )
                     self.send_json({"ok": True, "magic": result})
                 finally:
@@ -4848,6 +5271,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     str(payload.get("magic_id") or ""),
                     variant_key=str(payload.get("variant_key") or "half"),
                     video_duration_ms=safe_int(payload.get("video_duration_ms"), 100),
+                    export_format=str(payload.get("export_format") or "frames"),
                 )
                 self.send_json({"ok": True, "export": result})
                 return
