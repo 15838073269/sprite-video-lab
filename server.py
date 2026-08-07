@@ -180,6 +180,14 @@ MAGIC_RESIZE_MODES = {
     "hard": {"label": "硬", "resample": NEAREST},
     "soft": {"label": "软", "resample": BOX},
 }
+ALPHA_AWARE_DESPILL_RECOVERY_FLOOR = 0.055
+ALPHA_AWARE_DESPILL_CONFIDENCE_START = 0.035
+ALPHA_AWARE_DESPILL_CONFIDENCE_WIDTH = 0.16
+ALPHA_AWARE_DESPILL_RESIDUAL_STRENGTH = 0.78
+_SRGB_TO_LINEAR_LUT = tuple(
+    value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+    for value in (index / 255.0 for index in range(256))
+)
 
 _FFMPEG_HWACCELS_CACHE: set[str] | None = None
 _BIREFNET_MODEL_CACHE: dict[tuple[str, str], object] = {}
@@ -2195,6 +2203,110 @@ def apply_alpha_mask(image: Image.Image, alpha_mask: Image.Image) -> Image.Image
     return rgba
 
 
+def linear_to_srgb_byte(value: float) -> int:
+    normalized = max(0.0, min(1.0, float(value)))
+    if normalized <= 0.0031308:
+        srgb = normalized * 12.92
+    else:
+        srgb = (1.055 * (normalized ** (1.0 / 2.4))) - 0.055
+    return max(0, min(255, round(srgb * 255.0)))
+
+
+def alpha_aware_despill_frame(
+    source_image: Image.Image,
+    matte_image: Image.Image,
+    key_rgb: tuple[int, int, int],
+) -> Image.Image:
+    """Recover straight foreground colour without changing the authored matte.
+
+    A keyed edge is an observed mixture C = alpha * F + (1 - alpha) * B.
+    The matte supplies alpha and ``key_rgb`` supplies B, so solve for F in
+    linear light. Fully opaque source pixels are copied verbatim, and fully
+    transparent pixels are zeroed to prevent hidden screen colour from leaking
+    into later resize filters.
+    """
+    source = source_image.convert("RGBA")
+    matte = matte_image.convert("RGBA")
+    if source.size != matte.size:
+        raise ValueError("alpha-aware despill requires source and matte sizes to match")
+
+    key_channels = tuple(max(0, min(255, int(value))) for value in key_rgb)
+    key_linear = tuple(_SRGB_TO_LINEAR_LUT[value] for value in key_channels)
+    spill_channel = max(range(3), key=lambda index: key_channels[index])
+    sorted_key_channels = sorted(key_channels, reverse=True)
+    has_dominant_screen_channel = sorted_key_channels[0] - sorted_key_channels[1] >= 24
+
+    output_pixels: list[tuple[int, int, int, int]] = []
+    alpha_values = matte.getchannel("A").getdata()
+    for source_pixel, alpha in zip(source.getdata(), alpha_values):
+        r_value, g_value, b_value, _source_alpha = source_pixel
+        if alpha <= 0:
+            output_pixels.append((0, 0, 0, 0))
+            continue
+        if alpha >= 254:
+            output_pixels.append((r_value, g_value, b_value, alpha))
+            continue
+
+        normalized_alpha = alpha / 255.0
+        safe_alpha = max(normalized_alpha, ALPHA_AWARE_DESPILL_RECOVERY_FLOOR)
+        observed_linear = (
+            _SRGB_TO_LINEAR_LUT[r_value],
+            _SRGB_TO_LINEAR_LUT[g_value],
+            _SRGB_TO_LINEAR_LUT[b_value],
+        )
+        recovered_linear = tuple(
+            max(
+                0.0,
+                min(
+                    1.0,
+                    (observed_linear[index] - ((1.0 - normalized_alpha) * key_linear[index]))
+                    / safe_alpha,
+                ),
+            )
+            for index in range(3)
+        )
+        confidence = max(
+            0.0,
+            min(
+                1.0,
+                (normalized_alpha - ALPHA_AWARE_DESPILL_CONFIDENCE_START)
+                / ALPHA_AWARE_DESPILL_CONFIDENCE_WIDTH,
+            ),
+        )
+        if has_dominant_screen_channel:
+            source_channels = (r_value, g_value, b_value)
+            other_source_values = [
+                value for index, value in enumerate(source_channels) if index != spill_channel
+            ]
+            source_spill = source_channels[spill_channel] - max(other_source_values)
+            contamination_weight = max(0.0, min(1.0, (source_spill + 8.0) / 24.0))
+            confidence *= contamination_weight
+        cleaned_channels = [
+            linear_to_srgb_byte(
+                (observed_linear[index] * (1.0 - confidence))
+                + (recovered_linear[index] * confidence)
+            )
+            for index in range(3)
+        ]
+
+        if has_dominant_screen_channel:
+            other_values = [
+                value for index, value in enumerate(cleaned_channels) if index != spill_channel
+            ]
+            spill = max(0, cleaned_channels[spill_channel] - max(other_values))
+            edge_weight = (1.0 - normalized_alpha) ** 0.60
+            reduction = round(spill * edge_weight * ALPHA_AWARE_DESPILL_RESIDUAL_STRENGTH)
+            cleaned_channels[spill_channel] = max(0, cleaned_channels[spill_channel] - reduction)
+
+        output_pixels.append(
+            (cleaned_channels[0], cleaned_channels[1], cleaned_channels[2], alpha)
+        )
+
+    cleaned = Image.new("RGBA", source.size)
+    cleaned.putdata(output_pixels)
+    return cleaned
+
+
 def despill_alpha_edges(
     image: Image.Image,
     key_rgb: tuple[int, int, int],
@@ -2281,6 +2393,8 @@ def apply_matte_pipeline(
         "luma_polarity": normalized_luma_polarity,
         "luma_resolved_polarity": resolved_luma_polarity,
         "despill_strength": max(0.0, min(2.5, float(despill_strength or 0.0))),
+        "alpha_aware_despill": mode != "none",
+        "alpha_aware_despill_method": "linear_unmix" if mode != "none" else "",
         "halo_pixels": max(0, int(halo_pixels)),
         "corridorkey_enabled": False,
         "corridorkey_screen_color": "",
@@ -2308,7 +2422,7 @@ def apply_matte_pipeline(
                 key_rgb=key_rgb,
                 threshold=threshold,
                 softness=softness,
-                despill_strength=despill_strength,
+                despill_strength=0.0,
                 halo_pixels=halo_pixels,
             )
             if use_corridorkey:
@@ -2319,9 +2433,11 @@ def apply_matte_pipeline(
                     resolved_corridorkey_screen,
                     matte_info["despill_strength"],
                 )
-                keyed_frames.append(refined_frame)
+                frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
+                keyed_frames.append(alpha_aware_despill_frame(raw_image, refined_frame, frame_key_rgb))
             else:
-                keyed_frames.append(chroma_frame)
+                frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
+                keyed_frames.append(alpha_aware_despill_frame(raw_image, chroma_frame, frame_key_rgb))
         if corridor_info:
             matte_info.update(corridor_info)
         return keyed_frames, key_rgb, matte_info
@@ -2342,7 +2458,8 @@ def apply_matte_pipeline(
                 filter_size = (matte_info["halo_pixels"] * 2) + 1
                 alpha = alpha.filter(ImageFilter.MinFilter(filter_size))
             keyed_frame = apply_alpha_mask(raw_image, alpha)
-            keyed_frame = despill_alpha_edges(keyed_frame, key_rgb, matte_info["despill_strength"])
+            frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
+            keyed_frame = alpha_aware_despill_frame(raw_image, keyed_frame, frame_key_rgb)
             keyed_frames.append(keyed_frame)
         return keyed_frames, key_rgb, matte_info
 
@@ -2392,7 +2509,8 @@ def apply_matte_pipeline(
                 keyed_frame.putalpha(refined_alpha)
         else:
             keyed_frame = apply_alpha_mask(raw_image, alpha)
-            keyed_frame = despill_alpha_edges(keyed_frame, key_rgb, matte_info["despill_strength"])
+        frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
+        keyed_frame = alpha_aware_despill_frame(raw_image, keyed_frame, frame_key_rgb)
         keyed_frames.append(keyed_frame)
 
     if ai_info:

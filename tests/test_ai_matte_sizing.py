@@ -11,6 +11,109 @@ import server
 
 
 class AiMatteSizingTests(unittest.TestCase):
+    def test_alpha_aware_despill_recovers_edge_color_without_changing_alpha(self):
+        key_rgb = (14, 129, 64)
+        foreground_rgb = (236, 170, 80)
+        alpha = 64
+        normalized_alpha = alpha / 255.0
+        observed_rgb = tuple(
+            server.linear_to_srgb_byte(
+                (server._SRGB_TO_LINEAR_LUT[foreground_rgb[index]] * normalized_alpha)
+                + (server._SRGB_TO_LINEAR_LUT[key_rgb[index]] * (1.0 - normalized_alpha))
+            )
+            for index in range(3)
+        )
+        source = Image.new("RGBA", (3, 1))
+        source.putdata(
+            [
+                (*key_rgb, 255),
+                (*observed_rgb, 255),
+                (*foreground_rgb, 255),
+            ]
+        )
+        matte = source.copy()
+        alpha_channel = Image.new("L", (3, 1))
+        alpha_channel.putdata([0, alpha, 255])
+        matte.putalpha(alpha_channel)
+
+        cleaned = server.alpha_aware_despill_frame(source, matte, key_rgb)
+        cleaned_pixels = list(cleaned.getdata())
+
+        self.assertEqual(list(cleaned.getchannel("A").getdata()), [0, alpha, 255])
+        self.assertEqual(cleaned_pixels[0], (0, 0, 0, 0))
+        self.assertEqual(cleaned_pixels[2], (*foreground_rgb, 255))
+        before_distance = sum(abs(observed_rgb[index] - foreground_rgb[index]) for index in range(3))
+        after_distance = sum(abs(cleaned_pixels[1][index] - foreground_rgb[index]) for index in range(3))
+        self.assertLess(after_distance, before_distance)
+        self.assertLessEqual(abs(cleaned_pixels[1][0] - foreground_rgb[0]), 10)
+        self.assertLessEqual(abs(cleaned_pixels[1][1] - foreground_rgb[1]), 10)
+        self.assertLessEqual(abs(cleaned_pixels[1][2] - foreground_rgb[2]), 10)
+
+    def test_matte_pipeline_applies_alpha_aware_despill_automatically(self):
+        raw = Image.new("RGBA", (3, 1))
+        raw.putdata([(0, 180, 70, 255), (120, 155, 70, 255), (235, 170, 80, 255)])
+        with mock.patch.object(
+            server,
+            "alpha_aware_despill_frame",
+            wraps=server.alpha_aware_despill_frame,
+        ) as alpha_aware:
+            frames, _key_rgb, info = server.apply_matte_pipeline(
+                raw_images=[raw],
+                chroma_enabled=True,
+                matte_mode="chroma",
+                key_mode="manual",
+                manual_key_hex="#00B446",
+                threshold=12,
+                softness=150,
+                despill_strength=0.0,
+                halo_pixels=0,
+                ai_model="birefnet-hr-matting",
+                ai_device="auto",
+                ai_resolution="auto",
+                luma_black=0,
+                luma_white=85,
+                luma_gamma=0.55,
+                luma_strength=1.7,
+                luma_polarity="auto",
+                corridorkey_enabled=False,
+                corridorkey_screen="auto",
+            )
+
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(alpha_aware.call_count, 1)
+        self.assertTrue(info["alpha_aware_despill"])
+        self.assertEqual(info["alpha_aware_despill_method"], "linear_unmix")
+
+    def test_no_matte_skips_alpha_aware_despill(self):
+        raw = Image.new("RGBA", (1, 1), (30, 170, 80, 123))
+        with mock.patch.object(server, "alpha_aware_despill_frame") as alpha_aware:
+            frames, _key_rgb, info = server.apply_matte_pipeline(
+                raw_images=[raw],
+                chroma_enabled=False,
+                matte_mode="none",
+                key_mode="auto",
+                manual_key_hex="#00FF00",
+                threshold=80,
+                softness=16,
+                despill_strength=0.6,
+                halo_pixels=1,
+                ai_model="birefnet-hr-matting",
+                ai_device="auto",
+                ai_resolution="auto",
+                luma_black=0,
+                luma_white=85,
+                luma_gamma=0.55,
+                luma_strength=1.7,
+                luma_polarity="auto",
+                corridorkey_enabled=False,
+                corridorkey_screen="auto",
+            )
+
+        alpha_aware.assert_not_called()
+        self.assertFalse(info["alpha_aware_despill"])
+        self.assertEqual(info["alpha_aware_despill_method"], "")
+        self.assertEqual(frames[0].getpixel((0, 0)), raw.getpixel((0, 0)))
+
     def test_realesrgan_install_requires_explicit_confirmation(self):
         with mock.patch.object(server, "download_realesrgan_windows_package") as download_package:
             with self.assertRaisesRegex(ValueError, "确认"):

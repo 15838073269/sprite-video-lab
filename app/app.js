@@ -1683,6 +1683,9 @@ function formatMatteDetail(matte) {
     const device = matte.corridorkey_device ? ` / ${matte.corridorkey_device}` : "";
     parts.push(`CorridorKey ${screen}${device}`);
   }
+  if (matte.alpha_aware_despill) {
+    parts.push("\u81EA\u52A8 alpha-aware \u53BB\u6EA2\u8272");
+  }
   return parts.join(" / ");
 }
 

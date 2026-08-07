@@ -13,6 +13,8 @@ Sprite Video Lab can optionally use BiRefNet and CorridorKey for AI background r
 
 The app keeps the chroma-key workflow. AI matting is only used when you select it in step 3.
 
+Every matte mode except `none` automatically runs alpha-aware despill after its final alpha is resolved. The cleanup solves the foreground/background mixture in linear light, preserves the matte exactly, leaves fully opaque pixels unchanged, and requires no separate user option.
+
 ## Model Cache
 
 AI model weights are not bundled with the portable app. Chroma key, Luma-only, and no-matte workflows do not download them. When a BiRefNet or CorridorKey method is selected for the first time, the page asks for confirmation and only downloads the required models after the user accepts. The cache location is controlled by:
@@ -57,7 +59,7 @@ start_sprite_video_lab.bat
 
 - `BiRefNet HR-matting` is the quality-first default.
 - `BiRefNet lite-2K` is the lighter fallback when memory or speed is tight.
-- If a green edge remains, raise `despill strength` first. Try `1.2` to `1.8`.
+- Alpha-aware despill is automatic for every matte mode. If a green edge remains inside fully opaque artwork, use a targeted foreground color repair; shrinking alpha cannot remove contamination already painted into opaque pixels.
 - If the edge is still dirty, set `halo shrink` to `1` or `2`.
 - For green-screen sources, use manual background color and pick the actual background green when auto corner sampling misses the key color.
 - Use `BiRefNet subject / Luma restore brights` for VFX-heavy material. Use plain `BiRefNet` when there is no glow or bright particle effect to preserve.
