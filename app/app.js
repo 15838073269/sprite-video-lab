@@ -999,29 +999,22 @@ function currentMatteMode() {
 function matteModeUsesBiRefNet(mode) {
   return (
     mode === "birefnet" ||
+    mode === "chroma_birefnet" ||
     mode === "birefnet_corridorkey" ||
-    mode === "birefnet_corridorkey_key" ||
-    mode === "birefnet_luma" ||
-    mode === "birefnet_luma_key" ||
-    mode === "birefnet_luma_corridorkey"
+    mode === "birefnet_luma"
   );
 }
 
 function matteModeUsesCorridorKey(mode) {
-  return (
-    mode === "corridorkey" ||
-    mode === "birefnet_corridorkey" ||
-    mode === "birefnet_corridorkey_key" ||
-    mode === "birefnet_luma_corridorkey"
-  );
+  return mode === "corridorkey" || mode === "birefnet_corridorkey";
 }
 
 function matteModeUsesLuma(mode) {
-  return mode === "luma" || mode === "birefnet_luma" || mode === "birefnet_luma_key" || mode === "birefnet_luma_corridorkey";
+  return mode === "luma" || mode === "birefnet_luma";
 }
 
 function matteModeUsesChromaSeed(mode) {
-  return mode === "chroma" || mode === "corridorkey";
+  return mode === "chroma" || mode === "corridorkey" || mode === "chroma_birefnet" || mode === "birefnet_corridorkey";
 }
 
 function matteModeRequiresAiModel(mode) {
@@ -1260,14 +1253,18 @@ function applyFormState(snapshot) {
   }
 
   if (snapshot.keep_every != null) els.keepEveryInput.value = String(snapshot.keep_every);
-  if (snapshot.matte_mode && [...els.matteModeInput.options].some((option) => option.value === snapshot.matte_mode)) {
-    els.matteModeInput.value = snapshot.matte_mode;
+  const legacyMatteModes = {
+    birefnet_corridorkey_key: "birefnet_corridorkey",
+    birefnet_luma_key: "birefnet_luma",
+    birefnet_luma_corridorkey: "birefnet_luma",
+  };
+  const snapshotMatteMode = legacyMatteModes[snapshot.matte_mode] || snapshot.matte_mode;
+  if (snapshotMatteMode && [...els.matteModeInput.options].some((option) => option.value === snapshotMatteMode)) {
+    els.matteModeInput.value = snapshotMatteMode;
   }
   if (snapshot.corridorkey_enabled && !matteModeUsesCorridorKey(els.matteModeInput.value)) {
     if (els.matteModeInput.value === "birefnet") {
       els.matteModeInput.value = "birefnet_corridorkey";
-    } else if (els.matteModeInput.value === "birefnet_luma") {
-      els.matteModeInput.value = "birefnet_luma_corridorkey";
     } else if (els.matteModeInput.value === "chroma") {
       els.matteModeInput.value = "corridorkey";
     }
@@ -1631,16 +1628,14 @@ function formatSourceModeLabel(ffmpegAccel, sourceMediaType = uploadMediaType())
 
 function formatMatteModeLabel(matte) {
   const mode = typeof matte === "string" ? matte : (matte?.mode || "chroma");
-  let label = "chroma key";
+  let label = "Chroma";
   if (mode === "none") label = "\u4E0D\u53BB\u80CC\u666F";
-  if (mode === "birefnet") label = "\u53EA\u7528 BiRefNet";
-  if (mode === "corridorkey") label = "\u53EA\u7528 CorridorKey";
-  if (mode === "luma") label = "\u53EA\u7528 Luma";
-  if (mode === "birefnet_corridorkey") label = "BiRefNet \u7C97\u8499\u7248 / CorridorKey \u7CBE\u4FEE\u8FB9\u7F18";
-  if (mode === "birefnet_corridorkey_key") label = "BiRefNet \u540E\u518D\u7528 CorridorKey \u6536\u7D27\u62A0\u56FE";
-  if (mode === "birefnet_luma") label = "BiRefNet \u4FDD\u4E3B\u4F53 / Luma \u8865\u4EAE\u90E8";
-  if (mode === "birefnet_luma_key") label = "BiRefNet \u540E\u518D\u7528 Luma \u6536\u7D27\u62A0\u56FE";
-  if (mode === "birefnet_luma_corridorkey") label = "BiRefNet + Luma \u5408\u5E76\u540E / CorridorKey \u7CBE\u4FEE";
+  if (mode === "luma") label = "Luma";
+  if (mode === "birefnet") label = "BiRefNet";
+  if (mode === "corridorkey") label = "CorridorKey";
+  if (mode === "chroma_birefnet") label = "Chroma + BiRef \u8865\u4E3B\u4F53";
+  if (mode === "birefnet_corridorkey") label = "BiRef + Corridor \u8865\u5168";
+  if (mode === "birefnet_luma") label = "BiRef + Luma \u8865\u4EAE\u90E8";
   if (
     mode !== "none" &&
     !matteModeUsesCorridorKey(mode) &&

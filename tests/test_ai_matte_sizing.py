@@ -11,6 +11,194 @@ import server
 
 
 class AiMatteSizingTests(unittest.TestCase):
+    def test_corridorkey_mode_only_requires_corridorkey(self):
+        self.assertEqual(server.normalize_matte_mode("corridorkey", True), "corridorkey")
+        self.assertEqual(server.ai_components_for_matte_mode("corridorkey"), ["corridorkey"])
+
+    def test_removed_advanced_modes_migrate_to_the_nearest_kept_mode(self):
+        self.assertEqual(
+            server.normalize_matte_mode("birefnet_corridorkey_key", True),
+            "birefnet_corridorkey",
+        )
+        self.assertEqual(server.normalize_matte_mode("birefnet_luma_key", True), "birefnet_luma")
+        self.assertEqual(
+            server.normalize_matte_mode("birefnet_luma_corridorkey", True),
+            "birefnet_luma",
+        )
+
+    def test_corridorkey_alpha_only_keeps_every_visible_source_color_exact(self):
+        source = Image.new("RGBA", (4, 1))
+        source.putdata(
+            [
+                (10, 220, 40, 255),
+                (230, 35, 25, 255),
+                (40, 80, 220, 255),
+                (245, 225, 190, 255),
+            ]
+        )
+        alpha = Image.new("L", source.size)
+        alpha.putdata([0, 1, 128, 255])
+
+        result = server.apply_alpha_preserve_source_rgb(source, alpha)
+
+        self.assertEqual(list(result.getchannel("A").getdata()), [0, 1, 128, 255])
+        self.assertEqual(result.getpixel((0, 0)), (0, 0, 0, 0))
+        self.assertEqual(result.getpixel((1, 0))[:3], source.getpixel((1, 0))[:3])
+        self.assertEqual(result.getpixel((2, 0))[:3], source.getpixel((2, 0))[:3])
+        self.assertEqual(result.getpixel((3, 0))[:3], source.getpixel((3, 0))[:3])
+
+    def test_standalone_corridorkey_uses_its_alpha_without_birefnet(self):
+        raw = Image.new("RGBA", (2, 1))
+        raw.putdata([(0, 200, 40, 255), (215, 45, 30, 255)])
+        chroma_alpha = Image.new("L", raw.size)
+        chroma_alpha.putdata([0, 255])
+        corridor_alpha = Image.new("L", raw.size)
+        corridor_alpha.putdata([12, 180])
+
+        with (
+            mock.patch.object(
+                server,
+                "chroma_key_frame",
+                return_value=server.apply_alpha_mask(raw, chroma_alpha),
+            ),
+            mock.patch.object(
+                server,
+                "corridorkey_refine_frame",
+                return_value=(
+                    server.apply_alpha_mask(raw, corridor_alpha),
+                    {
+                        "corridorkey_enabled": True,
+                        "corridorkey_screen_color": "green",
+                    },
+                ),
+            ),
+            mock.patch.object(server, "birefnet_alpha_mask") as birefnet,
+        ):
+            frames, _key, info = server.apply_matte_pipeline(
+                raw_images=[raw],
+                chroma_enabled=True,
+                matte_mode="corridorkey",
+                key_mode="manual",
+                manual_key_hex="#00C828",
+                threshold=12,
+                softness=16,
+                despill_strength=0.6,
+                halo_pixels=0,
+                ai_model="birefnet-hr-matting",
+                ai_device="cpu",
+                ai_resolution=1024,
+                luma_black=0,
+                luma_white=85,
+                luma_gamma=0.55,
+                luma_strength=1.7,
+                luma_polarity="auto",
+                corridorkey_enabled=True,
+                corridorkey_screen="green",
+            )
+
+        birefnet.assert_not_called()
+        self.assertEqual(list(frames[0].getchannel("A").getdata()), [12, 180])
+        self.assertEqual(frames[0].getpixel((1, 0))[:3], raw.getpixel((1, 0))[:3])
+        self.assertTrue(info["corridorkey_enabled"])
+
+    def test_birefnet_corridor_only_uses_corridor_to_restore_alpha(self):
+        raw = Image.new("RGBA", (3, 1))
+        raw.putdata([(0, 200, 40, 255), (215, 45, 30, 255), (35, 80, 220, 255)])
+        ai_alpha = Image.new("L", raw.size)
+        ai_alpha.putdata([0, 255, 0])
+        chroma_alpha = Image.new("L", raw.size)
+        chroma_alpha.putdata([0, 200, 255])
+        corridor_alpha = Image.new("L", raw.size)
+        corridor_alpha.putdata([0, 0, 180])
+        observed = {}
+
+        def fake_corridorkey(image, alpha_mask, *_args):
+            observed["input_alpha"] = list(alpha_mask.getdata())
+            return server.apply_alpha_mask(image, corridor_alpha), {
+                "corridorkey_enabled": True,
+                "corridorkey_screen_color": "green",
+                "corridorkey_color_source": "source-exact",
+            }
+
+        with (
+            mock.patch.object(server, "birefnet_alpha_mask", return_value=(ai_alpha, {})),
+            mock.patch.object(
+                server,
+                "chroma_key_frame",
+                return_value=server.apply_alpha_mask(raw, chroma_alpha),
+            ),
+            mock.patch.object(server, "corridorkey_refine_frame", side_effect=fake_corridorkey),
+            mock.patch.object(server, "alpha_aware_despill_frame") as alpha_aware,
+        ):
+            frames, _key, info = server.apply_matte_pipeline(
+                raw_images=[raw],
+                chroma_enabled=True,
+                matte_mode="birefnet_corridorkey",
+                key_mode="manual",
+                manual_key_hex="#00C828",
+                threshold=12,
+                softness=16,
+                despill_strength=0.6,
+                halo_pixels=0,
+                ai_model="birefnet-hr-matting",
+                ai_device="cpu",
+                ai_resolution=1024,
+                luma_black=0,
+                luma_white=85,
+                luma_gamma=0.55,
+                luma_strength=1.7,
+                luma_polarity="auto",
+                corridorkey_enabled=True,
+                corridorkey_screen="green",
+            )
+
+        alpha_aware.assert_not_called()
+        self.assertEqual(observed["input_alpha"], [0, 200, 255])
+        self.assertEqual(list(frames[0].getchannel("A").getdata()), [0, 255, 180])
+        self.assertEqual(frames[0].getpixel((1, 0))[:3], raw.getpixel((1, 0))[:3])
+        self.assertEqual(frames[0].getpixel((2, 0))[:3], raw.getpixel((2, 0))[:3])
+        self.assertEqual(info["alpha_merge"], "birefnet+corridor-union")
+
+    def test_chroma_birefnet_uses_birefnet_to_restore_key_colored_subject_areas(self):
+        raw = Image.new("RGBA", (3, 1), (80, 90, 100, 255))
+        ai_alpha = Image.new("L", raw.size)
+        ai_alpha.putdata([0, 0, 255])
+        chroma_alpha = Image.new("L", raw.size)
+        chroma_alpha.putdata([0, 255, 0])
+
+        with (
+            mock.patch.object(server, "birefnet_alpha_mask", return_value=(ai_alpha, {})),
+            mock.patch.object(
+                server,
+                "chroma_key_frame",
+                return_value=server.apply_alpha_mask(raw, chroma_alpha),
+            ),
+        ):
+            frames, _key, info = server.apply_matte_pipeline(
+                raw_images=[raw],
+                chroma_enabled=True,
+                matte_mode="chroma_birefnet",
+                key_mode="manual",
+                manual_key_hex="#506070",
+                threshold=12,
+                softness=16,
+                despill_strength=0.6,
+                halo_pixels=0,
+                ai_model="birefnet-hr-matting",
+                ai_device="cpu",
+                ai_resolution=1024,
+                luma_black=0,
+                luma_white=85,
+                luma_gamma=0.55,
+                luma_strength=1.7,
+                luma_polarity="auto",
+                corridorkey_enabled=False,
+                corridorkey_screen="auto",
+            )
+
+        self.assertEqual(list(frames[0].getchannel("A").getdata()), [0, 255, 255])
+        self.assertEqual(info["alpha_merge"], "chroma+birefnet-union")
+
     def test_alpha_aware_despill_recovers_edge_color_without_changing_alpha(self):
         key_rgb = (14, 129, 64)
         foreground_rgb = (236, 170, 80)

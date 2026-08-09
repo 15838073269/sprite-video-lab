@@ -216,15 +216,13 @@
                       <section class="quick-reference-section quick-reference-wide">
                         <h4>处理方式</h4>
                         <dl class="quick-reference-list quick-reference-modes">
-                          <div><dt>chroma key</dt><dd>绿幕、蓝幕、白底、灰底等受控纯色背景，速度最快。</dd></div>
-                          <div><dt>只用 BiRefNet</dt><dd>真实背景或 AI 生成背景，主体轮廓明确时使用。</dd></div>
-                          <div><dt>只用 CorridorKey</dt><dd>标准绿幕或蓝幕，重点修复头发、柔边和颜色溢出。</dd></div>
-                          <div><dt>只用 Luma</dt><dd>黑底或白底的火焰、闪电、粒子和亮部 VFX。</dd></div>
-                          <div><dt>BiRefNet 粗蒙版 / CorridorKey 精修边缘</dt><dd>先找主体，再重建绿幕或蓝幕边缘。</dd></div>
-                          <div><dt>BiRefNet 后再用 CorridorKey 收紧抠图</dt><dd>只进一步删除背景，适合边缘仍有幕布残留。</dd></div>
-                          <div><dt>BiRefNet 保主体 / Luma 补亮部</dt><dd>保住主体，同时补回火焰、闪电、粒子等亮部。</dd></div>
-                          <div><dt>BiRefNet 后再用 Luma 收紧抠图</dt><dd>按亮度进一步删除背景，适合主体外仍有亮度杂点。</dd></div>
-                          <div><dt>BiRefNet + Luma 合并后 / CorridorKey 精修</dt><dd>兼顾主体、亮部和绿蓝幕边缘，处理最重。</dd></div>
+                          <div><dt>Chroma</dt><dd>绿幕、蓝幕、白底、灰底等受控纯色背景，速度最快。</dd></div>
+                          <div><dt>Luma</dt><dd>黑底或白底的火焰、闪电、粒子和亮部 VFX。</dd></div>
+                          <div><dt>BiRefNet</dt><dd>真实背景或 AI 生成背景，主体轮廓明确时使用。</dd></div>
+                          <div><dt>CorridorKey</dt><dd>标准绿幕或蓝幕，由 CorridorKey 输出最终遮罩。</dd></div>
+                          <div><dt>Chroma + BiRef 补主体</dt><dd>Chroma 负责去背景，BiRefNet 补回主体内部与背景键色相同而被错抠的区域。</dd></div>
+                          <div><dt>BiRef + Corridor 补全</dt><dd>BiRefNet 选择主体，CorridorKey 只补回其确认不该抠除的区域。</dd></div>
+                          <div><dt>BiRef + Luma 补亮部</dt><dd>保住主体，同时补回火焰、闪电、粒子等亮部。</dd></div>
                         </dl>
                       </section>
 
@@ -245,15 +243,13 @@
                     <label class="field">
                       <span>处理方式</span>
                       <select id="matteModeInput">
-                        <option value="chroma" selected>chroma key</option>
-                        <option value="birefnet">只用 BiRefNet</option>
-                        <option value="corridorkey">只用 CorridorKey</option>
-                        <option value="luma">只用 Luma</option>
-                        <option value="birefnet_corridorkey">BiRefNet 粗蒙版 / CorridorKey 精修边缘</option>
-                        <option value="birefnet_corridorkey_key">BiRefNet 后再用 CorridorKey 收紧抠图</option>
-                        <option value="birefnet_luma">BiRefNet 保主体 / Luma 补亮部</option>
-                        <option value="birefnet_luma_key">BiRefNet 后再用 Luma 收紧抠图</option>
-                        <option value="birefnet_luma_corridorkey">BiRefNet + Luma 合并后 / CorridorKey 精修</option>
+                        <option value="chroma" selected>Chroma</option>
+                        <option value="luma">Luma</option>
+                        <option value="birefnet">BiRefNet</option>
+                        <option value="corridorkey">CorridorKey</option>
+                        <option value="chroma_birefnet">Chroma + BiRef 补主体</option>
+                        <option value="birefnet_corridorkey">BiRef + Corridor 补全</option>
+                        <option value="birefnet_luma">BiRef + Luma 补亮部</option>
                       </select>
                       <small>选处理方式即可，细节由程序自动处理。</small>
                     </label>

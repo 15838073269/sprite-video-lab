@@ -116,28 +116,22 @@ AI_MATTE_MODEL_LABELS = {
 AI_MATTE_MODES = {
     "none",
     "chroma",
+    "luma",
     "birefnet",
     "corridorkey",
-    "luma",
+    "chroma_birefnet",
     "birefnet_corridorkey",
-    "birefnet_corridorkey_key",
     "birefnet_luma",
-    "birefnet_luma_key",
-    "birefnet_luma_corridorkey",
 }
 BIREFNET_MATTE_MODES = {
     "birefnet",
+    "chroma_birefnet",
     "birefnet_corridorkey",
-    "birefnet_corridorkey_key",
     "birefnet_luma",
-    "birefnet_luma_key",
-    "birefnet_luma_corridorkey",
 }
 CORRIDORKEY_MATTE_MODES = {
     "corridorkey",
     "birefnet_corridorkey",
-    "birefnet_corridorkey_key",
-    "birefnet_luma_corridorkey",
 }
 AI_MATTE_DEVICE_ALIASES = {
     "": "auto",
@@ -424,7 +418,7 @@ def configure_ai_model_cache() -> Path:
 
 
 def ai_components_for_matte_mode(matte_mode: str) -> list[str]:
-    mode = str(matte_mode or "").strip().lower()
+    mode = normalize_matte_mode(str(matte_mode or ""), True)
     components = []
     if mode in BIREFNET_MATTE_MODES:
         components.append("birefnet")
@@ -684,12 +678,12 @@ def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
     raw_value = str(raw or "").strip().lower()
     compact_value = re.sub(r"\s+", "", raw_value)
     dash_aliases = {
-        "birefnet-luma": "birefnet_luma_key",
-        "birefnet-luma-key": "birefnet_luma_key",
-        "birefnet-corridor": "birefnet_corridorkey_key",
-        "birefnet-corridor-key": "birefnet_corridorkey_key",
-        "birefnet-corridorkey": "birefnet_corridorkey_key",
-        "birefnet-corridorkey-key": "birefnet_corridorkey_key",
+        "birefnet-luma": "birefnet_luma",
+        "birefnet-luma-key": "birefnet_luma",
+        "birefnet-corridor": "birefnet_corridorkey",
+        "birefnet-corridorkey": "birefnet_corridorkey",
+        "birefnet-corridor-key": "birefnet_corridorkey",
+        "birefnet-corridorkey-key": "birefnet_corridorkey",
     }
     if raw_value in dash_aliases or compact_value in dash_aliases:
         return dash_aliases.get(raw_value, dash_aliases[compact_value])
@@ -714,27 +708,33 @@ def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
         "luma": "luma",
         "luma_key": "luma",
         "luminance": "luma",
+        "chroma_birefnet": "chroma_birefnet",
+        "chroma+birefnet": "chroma_birefnet",
+        "chroma_biref": "chroma_birefnet",
+        "chroma+biref": "chroma_birefnet",
+        "birefnet_chroma": "chroma_birefnet",
+        "birefnet+chroma": "chroma_birefnet",
         "birefnet_corridor": "birefnet_corridorkey",
         "birefnet_corridor_key": "birefnet_corridorkey",
         "birefnet_corridorkey": "birefnet_corridorkey",
         "birefnet+corridor": "birefnet_corridorkey",
         "birefnet+corridorkey": "birefnet_corridorkey",
-        "birefnet_corridorkey_key": "birefnet_corridorkey_key",
-        "birefnet_corridor_keyer": "birefnet_corridorkey_key",
-        "birefnet_corridorkey_keyer": "birefnet_corridorkey_key",
+        "birefnet_corridorkey_key": "birefnet_corridorkey",
+        "birefnet_corridor_keyer": "birefnet_corridorkey",
+        "birefnet_corridorkey_keyer": "birefnet_corridorkey",
         "birefnet_luma": "birefnet_luma",
         "birefnet+luma": "birefnet_luma",
-        "birefnet_luma_key": "birefnet_luma_key",
-        "birefnet_luma_keyer": "birefnet_luma_key",
-        "birefnet_luma_corridorkey": "birefnet_luma_corridorkey",
-        "birefnet_luma_corridor": "birefnet_luma_corridorkey",
-        "birefnet_luma_corridor_key": "birefnet_luma_corridorkey",
-        "birefnet_corridorkey_luma": "birefnet_luma_corridorkey",
-        "birefnet_corridor_luma": "birefnet_luma_corridorkey",
-        "birefnet+luma+corridor": "birefnet_luma_corridorkey",
-        "birefnet+luma+corridorkey": "birefnet_luma_corridorkey",
-        "birefnet+corridor+luma": "birefnet_luma_corridorkey",
-        "birefnet+corridorkey+luma": "birefnet_luma_corridorkey",
+        "birefnet_luma_key": "birefnet_luma",
+        "birefnet_luma_keyer": "birefnet_luma",
+        "birefnet_luma_corridorkey": "birefnet_luma",
+        "birefnet_luma_corridor": "birefnet_luma",
+        "birefnet_luma_corridor_key": "birefnet_luma",
+        "birefnet_corridorkey_luma": "birefnet_luma",
+        "birefnet_corridor_luma": "birefnet_luma",
+        "birefnet+luma+corridor": "birefnet_luma",
+        "birefnet+luma+corridorkey": "birefnet_luma",
+        "birefnet+corridor+luma": "birefnet_luma",
+        "birefnet+corridorkey+luma": "birefnet_luma",
         "ai_luma": "birefnet_luma",
         "ai_glow": "birefnet_luma",
     }
@@ -1917,11 +1917,11 @@ def corridorkey_refine_frame(
     )
     alpha = corridorkey_alpha_to_image(result["processed"][..., 3:4])
     refined = apply_alpha_mask(image, alpha)
-    refined = despill_alpha_edges(refined, auto_key_color(image), despill_strength)
 
     info = {
         "corridorkey_enabled": True,
-        "corridorkey_color_source": "original",
+        "corridorkey_color_source": "source-exact",
+        "corridorkey_rgb_processing": "alpha-only",
         "corridorkey_screen_color": screen_color,
         "corridorkey_device": device,
         "corridorkey_resolution": CORRIDORKEY_IMG_SIZE,
@@ -2215,6 +2215,14 @@ def apply_alpha_mask(image: Image.Image, alpha_mask: Image.Image) -> Image.Image
     return rgba
 
 
+def apply_alpha_preserve_source_rgb(image: Image.Image, alpha_mask: Image.Image) -> Image.Image:
+    """Apply alpha without altering any visible source RGB values."""
+    rgba = apply_alpha_mask(image, alpha_mask)
+    transparent_pixels = rgba.getchannel("A").point(lambda alpha: 255 if alpha == 0 else 0)
+    rgba.paste((0, 0, 0, 0), mask=transparent_pixels)
+    return rgba
+
+
 def linear_to_srgb_byte(value: float) -> int:
     normalized = max(0.0, min(1.0, float(value)))
     if normalized <= 0.0031308:
@@ -2358,6 +2366,29 @@ def despill_alpha_edges(
     return cleaned
 
 
+def restore_source_colors_after_matte(
+    source_images: list[Image.Image],
+    matte_frames: list[Image.Image],
+) -> list[Image.Image]:
+    """Keep a computed matte while rebuilding RGB from the uploaded frames.
+
+    Preprocessing may improve the alpha estimate, but its recoloured pixels must
+    not become the delivered artwork. Every visible RGB value comes from the
+    uploaded frame; only fully transparent hidden RGB is cleared.
+    """
+    if len(source_images) != len(matte_frames):
+        raise ValueError("source and matte frame counts must match")
+
+    restored_frames: list[Image.Image] = []
+    for source_image, matte_frame in zip(source_images, matte_frames):
+        source = source_image.convert("RGBA")
+        matte = matte_frame.convert("RGBA")
+        if source.size != matte.size:
+            raise ValueError("source and matte frame sizes must match")
+        restored_frames.append(apply_alpha_preserve_source_rgb(source, matte.getchannel("A")))
+    return restored_frames
+
+
 def apply_matte_pipeline(
     raw_images: list[Image.Image],
     chroma_enabled: bool,
@@ -2397,7 +2428,7 @@ def apply_matte_pipeline(
         "repo_id": "",
         "device": "",
         "resolution": 0,
-        "luma_enabled": mode in {"luma", "birefnet_luma", "birefnet_luma_key", "birefnet_luma_corridorkey"},
+        "luma_enabled": mode in {"luma", "birefnet_luma"},
         "luma_black": normalized_luma_black,
         "luma_white": normalized_luma_white,
         "luma_gamma": max(0.05, float(luma_gamma or 1.0)),
@@ -2412,14 +2443,16 @@ def apply_matte_pipeline(
         "corridorkey_screen_color": "",
         "corridorkey_device": "",
         "corridorkey_resolution": 0,
+        "alpha_merge": "",
     }
     mode_uses_corridorkey = mode in {
         "corridorkey",
         "birefnet_corridorkey",
-        "birefnet_corridorkey_key",
-        "birefnet_luma_corridorkey",
     }
     use_corridorkey = bool((corridorkey_enabled or mode_uses_corridorkey) and mode != "none")
+    if use_corridorkey:
+        matte_info["alpha_aware_despill"] = False
+        matte_info["alpha_aware_despill_method"] = "corridorkey-alpha-only"
     resolved_corridorkey_screen = resolve_corridorkey_screen(corridorkey_screen, key_rgb)
 
     if mode == "none":
@@ -2437,7 +2470,7 @@ def apply_matte_pipeline(
                 despill_strength=0.0,
                 halo_pixels=halo_pixels,
             )
-            if use_corridorkey:
+            if mode == "corridorkey":
                 refined_frame, corridor_info = corridorkey_refine_frame(
                     raw_image,
                     chroma_frame.getchannel("A"),
@@ -2445,8 +2478,9 @@ def apply_matte_pipeline(
                     resolved_corridorkey_screen,
                     matte_info["despill_strength"],
                 )
-                frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
-                keyed_frames.append(alpha_aware_despill_frame(raw_image, refined_frame, frame_key_rgb))
+                keyed_frames.append(
+                    apply_alpha_preserve_source_rgb(raw_image, refined_frame.getchannel("A"))
+                )
             else:
                 frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
                 keyed_frames.append(alpha_aware_despill_frame(raw_image, chroma_frame, frame_key_rgb))
@@ -2492,7 +2526,7 @@ def apply_matte_pipeline(
         if matte_info["halo_pixels"] > 0:
             filter_size = (matte_info["halo_pixels"] * 2) + 1
             ai_alpha = ai_alpha.filter(ImageFilter.MinFilter(filter_size))
-        if mode in {"birefnet_luma", "birefnet_luma_key", "birefnet_luma_corridorkey"}:
+        if mode == "birefnet_luma":
             luma_alpha = luminance_alpha_mask(
                 raw_image,
                 matte_info["luma_black"],
@@ -2502,27 +2536,49 @@ def apply_matte_pipeline(
                 polarity=matte_info["luma_resolved_polarity"],
                 key_rgb=key_rgb,
             )
-            if mode == "birefnet_luma_key":
-                alpha = ImageChops.darker(ai_alpha, luma_alpha)
-            else:
-                alpha = ImageChops.lighter(ai_alpha, luma_alpha)
+            alpha = ImageChops.lighter(ai_alpha, luma_alpha)
         else:
             alpha = ai_alpha
+        frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
+        if mode == "chroma_birefnet":
+            chroma_alpha = chroma_key_frame(
+                image=raw_image,
+                key_rgb=frame_key_rgb,
+                threshold=threshold,
+                softness=softness,
+                despill_strength=0.0,
+                halo_pixels=halo_pixels,
+            ).getchannel("A")
+            alpha = ImageChops.lighter(ai_alpha, chroma_alpha)
+            matte_info["alpha_merge"] = "chroma+birefnet-union"
         if use_corridorkey:
+            corridor_input_alpha = alpha
+            if mode == "birefnet_corridorkey":
+                corridor_input_alpha = chroma_key_frame(
+                    image=raw_image,
+                    key_rgb=frame_key_rgb,
+                    threshold=threshold,
+                    softness=softness,
+                    despill_strength=0.0,
+                    halo_pixels=halo_pixels,
+                ).getchannel("A")
             keyed_frame, corridor_info = corridorkey_refine_frame(
                 raw_image,
-                alpha,
+                corridor_input_alpha,
                 ai_device,
                 resolved_corridorkey_screen,
                 matte_info["despill_strength"],
             )
-            if mode == "birefnet_corridorkey_key":
-                refined_alpha = ImageChops.darker(ai_alpha, keyed_frame.getchannel("A"))
-                keyed_frame.putalpha(refined_alpha)
+            if mode == "birefnet_corridorkey":
+                restored_alpha = ImageChops.lighter(ai_alpha, keyed_frame.getchannel("A"))
+                keyed_frame.putalpha(restored_alpha)
+                matte_info["alpha_merge"] = "birefnet+corridor-union"
         else:
             keyed_frame = apply_alpha_mask(raw_image, alpha)
-        frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
-        keyed_frame = alpha_aware_despill_frame(raw_image, keyed_frame, frame_key_rgb)
+        if use_corridorkey:
+            keyed_frame = apply_alpha_preserve_source_rgb(raw_image, keyed_frame.getchannel("A"))
+        else:
+            keyed_frame = alpha_aware_despill_frame(raw_image, keyed_frame, frame_key_rgb)
         keyed_frames.append(keyed_frame)
 
     if ai_info:
@@ -2845,6 +2901,7 @@ def process_video_to_job(
         )
         source_entries = []
     raw_images = [open_rgba_image(path) for path in raw_paths]
+    source_color_images = raw_images
     output_scale = normalize_output_scale(output_scale)
     target_size = target_size_from_source_height(max(image.height for image in raw_images), output_scale)
 
@@ -2882,6 +2939,13 @@ def process_video_to_job(
         corridorkey_enabled=corridorkey_enabled,
         corridorkey_screen=corridorkey_screen,
     )
+    if preprocess_esr_smoothing and matte_info["corridorkey_enabled"]:
+        keyed_frames = restore_source_colors_after_matte(
+            source_color_images,
+            keyed_frames,
+        )
+        matte_info["corridorkey_color_source"] = "uploaded-original"
+        preprocess_esr_info["used_for_matte_only"] = True
 
     hard_alpha = matte_info["mode"] == "chroma" and softness == 0 and not matte_info["corridorkey_enabled"]
     if should_preserve_source_canvas(media_type, reduce_px, canvas_mode):
@@ -3403,6 +3467,7 @@ def preview_frame(
     else:
         _, ffmpeg_accel = extract_single_frame(source_path, raw_path, sample_time)
     raw_image = open_rgba_image(raw_path)
+    source_color_image = raw_image
     output_scale = normalize_output_scale(output_scale)
     target_size = target_size_from_source_height(raw_image.height, output_scale)
 
@@ -3443,6 +3508,13 @@ def preview_frame(
         corridorkey_enabled=corridorkey_enabled,
         corridorkey_screen=corridorkey_screen,
     )
+    if preprocess_esr_smoothing and matte_info["corridorkey_enabled"]:
+        keyed_frames = restore_source_colors_after_matte(
+            [source_color_image],
+            keyed_frames,
+        )
+        matte_info["corridorkey_color_source"] = "uploaded-original"
+        preprocess_esr_info["used_for_matte_only"] = True
     keyed_image = keyed_frames[0]
 
     hard_alpha = matte_info["mode"] == "chroma" and softness == 0 and not matte_info["corridorkey_enabled"]

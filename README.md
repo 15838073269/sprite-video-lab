@@ -36,11 +36,11 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - 批处理前先单帧预览参数效果。
 - 默认保留源视频/图片画布，方便后续动画对齐。
 - 纯色/绿幕抠图，程序自动处理阈值、软边、去色溢出和边缘收缩。
-- 除“不抠图”外，所有抠图方式都会在最终 alpha 上自动执行 alpha-aware 去溢色：在线性光中反解半透明前景色，保持 alpha 和完全不透明的内部颜色不变，无需额外开关。
+- Chroma、Luma 和不含 CorridorKey 的 BiRefNet 模式会在最终 alpha 上自动执行 alpha-aware 去溢色；CorridorKey 模式保持源图可见 RGB 不变。
 - BiRefNet AI 主体抠图。
 - Luma 亮度抠图，用来保留发光、火焰、闪电、粒子和亮部 VFX。
-- CorridorKey 绿幕/蓝幕边缘精修和前景颜色重建。
-- BiRefNet 与 Luma/CorridorKey 可选择“补亮部/精修边缘”或“收紧抠图”两类组合方式。
+- CorridorKey 绿幕/蓝幕遮罩处理。
+- Chroma、Luma、CorridorKey 与 BiRefNet 的组合模式只做遮罩并集补全，不再提供“收紧抠图”模式。
 - 单帧预览支持原始抽帧全分辨率查看，处理后预览可切换棋盘格或指定纯色背景。
 - 预览和批处理后处理：按照当前自动识别或手动指定的背景色处理残留（支持绿色、洋红等颜色），可将背景残留转黑或把饱和度归零；另支持半透明像素涂黑、半透明像素转不透明。
 - BiRefNet 弱蒙版会自动回退到 general 模型，避免小尺寸插画/GIF 被抠成全透明。
@@ -74,15 +74,13 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 
 Sprite Video Lab 目前提供这些背景处理模式：
 
-- `chroma key`：快速处理受控纯色背景，适合绿幕、蓝幕、白底、灰底等素材。
-- `只用 BiRefNet`：AI 主体抠图，适合非纯色背景或生成图背景。
-- `只用 CorridorKey`：先用绿幕算法生成粗 alpha，再用 CorridorKey 重建边缘和前景颜色。
-- `只用 Luma`：基于亮度生成 alpha，适合亮部特效、火焰、闪电、粒子等素材。
-- `BiRefNet 粗蒙版 / CorridorKey 精修边缘`：BiRefNet 先给主体 alpha，再用 CorridorKey 做绿幕/蓝幕边缘重建。
-- `BiRefNet 后再用 CorridorKey 收紧抠图`：先做 CorridorKey 精修，再与 BiRefNet alpha 相交，只进一步删除背景。
-- `BiRefNet 保主体 / Luma 补亮部`：主体 alpha 加亮度 alpha，适合 VFX 比较重的 Sprite。
-- `BiRefNet 后再用 Luma 收紧抠图`：BiRefNet alpha 与亮度 alpha 相交，让 Luma 进一步删掉不够亮的背景。
-- `BiRefNet + Luma 合并后 / CorridorKey 精修`：先合成主体 alpha 和亮度 alpha，再用 CorridorKey 做边缘/颜色重建。
+- `Chroma`：快速处理受控纯色背景，适合绿幕、蓝幕、白底、灰底等素材。
+- `Luma`：基于亮度生成 alpha，适合亮部特效、火焰、闪电、粒子等素材。
+- `BiRefNet`：AI 主体抠图，适合非纯色背景或生成图背景。
+- `CorridorKey`：处理标准绿幕或蓝幕，最终 alpha 只取 CorridorKey 输出。
+- `Chroma + BiRef 补主体`：合并 Chroma 与 BiRefNet alpha，由 BiRefNet 补回主体内部与背景键色相同而被 Chroma 错抠的区域。
+- `BiRef + Corridor 补全`：合并 BiRefNet 与 CorridorKey alpha；CorridorKey 只补回内容，不能删除 BiRefNet 已保留的区域。
+- `BiRef + Luma 补亮部`：合并 BiRefNet 与亮度 alpha，补回火焰、闪电、粒子等亮部。
 
 灰底、白底、黑底素材优先使用 `chroma key`；需要重建绿幕/蓝幕边缘时，再选择包含 CorridorKey 的处理方式。
 
