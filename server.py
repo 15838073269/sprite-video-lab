@@ -1976,6 +1976,8 @@ def is_low_confidence_birefnet_mask(score: dict) -> bool:
         return True
     if visible_ratio <= 0.15:
         return False
+    if visible_ratio >= max(strong_ratio * 2.0, strong_ratio + 0.08) and mean_alpha < 36:
+        return True
     if strong_ratio >= 0.03:
         return False
     return mean_alpha < 36
@@ -1986,10 +1988,20 @@ def should_use_birefnet_fallback(current_score: dict, fallback_score: dict) -> b
     fallback_max = int(fallback_score.get("max_alpha") or 0)
     current_strong = float(current_score.get("strong_ratio") or 0.0)
     fallback_strong = float(fallback_score.get("strong_ratio") or 0.0)
+    current_visible = float(current_score.get("visible_ratio") or 0.0)
+    fallback_visible = float(fallback_score.get("visible_ratio") or 0.0)
+    current_mean = float(current_score.get("mean_alpha") or 0.0)
+    fallback_mean = float(fallback_score.get("mean_alpha") or 0.0)
     if fallback_max < 128:
         return False
     if fallback_max >= max(160, current_max * 2) and fallback_strong > current_strong:
         return True
+    if current_visible >= max(current_strong * 2.0, current_strong + 0.08):
+        return (
+            fallback_strong >= max(current_strong * 1.05, current_strong + 0.005)
+            and fallback_visible <= current_visible * 0.75
+            and fallback_mean >= current_mean * 1.05
+        )
     return current_max < 80 and fallback_strong >= 0.005
 
 
@@ -2114,7 +2126,7 @@ def birefnet_alpha_mask(
             fallback_info["mask_score"] = fallback_score
             fallback_info["requested_model_key"] = normalized_model_key
             fallback_info["fallback_model_key"] = fallback_model_key
-            fallback_info["fallback_reason"] = "selected BiRefNet model produced a weak alpha mask"
+            fallback_info["fallback_reason"] = "selected BiRefNet model produced a weak or diffuse alpha mask"
             fallback_info["solid_key_fallback"] = False
             fallback_info["solid_key_color"] = ""
             return fallback_mask, fallback_info

@@ -325,6 +325,80 @@ class AiMatteSizingTests(unittest.TestCase):
         self.assertEqual(resized.getpixel((0, 127)), (210, 20, 30))
         self.assertEqual(resized.getpixel((127, 127)), (210, 20, 30))
 
+    def test_birefnet_diffuse_mask_uses_stronger_general_fallback(self):
+        hr_score = {
+            "max_alpha": 255,
+            "mean_alpha": 19.58,
+            "visible_ratio": 0.235,
+            "strong_ratio": 0.0759,
+        }
+        general_score = {
+            "max_alpha": 255,
+            "mean_alpha": 21.92,
+            "visible_ratio": 0.09,
+            "strong_ratio": 0.0859,
+        }
+
+        self.assertTrue(server.is_low_confidence_birefnet_mask(hr_score))
+        self.assertTrue(server.should_use_birefnet_fallback(hr_score, general_score))
+
+    def test_birefnet_diffuse_mask_keeps_hr_when_general_is_not_stronger(self):
+        hr_score = {
+            "max_alpha": 255,
+            "mean_alpha": 19.58,
+            "visible_ratio": 0.235,
+            "strong_ratio": 0.0759,
+        }
+        general_score = {
+            "max_alpha": 255,
+            "mean_alpha": 18.0,
+            "visible_ratio": 0.08,
+            "strong_ratio": 0.07,
+        }
+
+        self.assertFalse(server.should_use_birefnet_fallback(hr_score, general_score))
+
+    def test_birefnet_alpha_mask_switches_from_diffuse_hr_to_general(self):
+        image = Image.new("RGBA", (10, 10), (40, 160, 80, 255))
+        hr_mask = Image.new("L", (10, 10), 0)
+        general_mask = Image.new("L", (10, 10), 255)
+        hr_score = {
+            "max_alpha": 255,
+            "mean_alpha": 19.58,
+            "visible_ratio": 0.235,
+            "strong_ratio": 0.0759,
+        }
+        general_score = {
+            "max_alpha": 255,
+            "mean_alpha": 21.92,
+            "visible_ratio": 0.09,
+            "strong_ratio": 0.0859,
+        }
+
+        with (
+            mock.patch.object(
+                server,
+                "run_birefnet_inference",
+                side_effect=[
+                    (hr_mask, {"model_key": "birefnet-hr-matting"}),
+                    (general_mask, {"model_key": "birefnet-general"}),
+                ],
+            ) as run_inference,
+            mock.patch.object(server, "birefnet_mask_score", side_effect=[hr_score, general_score]),
+            mock.patch.object(server, "solid_background_fallback_alpha", return_value=None),
+        ):
+            selected_mask, info = server.birefnet_alpha_mask(
+                image,
+                "birefnet-hr-matting",
+                "cpu",
+                1024,
+            )
+
+        self.assertIs(selected_mask, general_mask)
+        self.assertEqual(info["model_key"], "birefnet-general")
+        self.assertEqual(info["fallback_model_key"], "birefnet-general")
+        self.assertEqual(run_inference.call_count, 2)
+
     def test_auto_key_color_uses_dominant_border_color_not_corner_average(self):
         image = Image.new("RGBA", (128, 64), (255, 255, 255, 255))
         for y in range(40, 64):
