@@ -4,7 +4,7 @@ Sprite Video Lab can optionally use BiRefNet and EZ-CorridorKey for AI backgroun
 
 - `BiRefNet`: subject alpha from the model.
 - `Luma`: brightness-derived alpha for glow, fire, lightning, particles, and bright-on-dark VFX.
-- `CorridorKey`: uses a chroma-key alpha hint, then EZ-CorridorKey reconstructs foreground color, refines alpha, removes spill, despeckles, and optionally applies a garbage matte.
+- `CorridorKey`: uses a selectable Chroma or BiRefNet coarse alpha hint, then EZ-CorridorKey reconstructs foreground color, refines alpha, removes spill, despeckles, and optionally applies a garbage matte.
 - `None`: keeps the source image without matting.
 
 The app keeps the chroma-key workflow. AI matting is only used when you select it in step 3.
@@ -55,6 +55,7 @@ start_sprite_video_lab.bat
 
 - `BiRefNet HR-matting` is the only downloaded BiRefNet model.
 - CorridorKey downloads only the green-screen checkpoint. Use Chroma for blue-screen footage.
+- CorridorKey defaults to a Chroma coarse mask. Selecting BiRefNet as the coarse mask also requires the pinned HR-matting model.
 - Alpha-aware despill is automatic for Chroma, Luma, and BiRefNet. CorridorKey exposes EZ-CorridorKey's despill strength directly.
 - If the edge is still dirty, set `halo shrink` to `1` or `2`.
 - For green-screen sources, use manual background color and pick the actual background green when auto corner sampling misses the key color.

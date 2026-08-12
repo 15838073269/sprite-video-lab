@@ -145,6 +145,7 @@ CORRIDORKEY_REPO_URL = "https://github.com/edenaion/EZ-CorridorKey"
 CORRIDORKEY_IMG_SIZE = 2048
 CORRIDORKEY_GPU_DESPECKLE_PIXEL_LIMIT = 2**24
 CORRIDORKEY_COLOR_SPACES = {"srgb", "linear"}
+CORRIDORKEY_COARSE_MASKS = {"chroma", "birefnet"}
 CORRIDORKEY_DEFAULTS = {
     "color_space": "srgb",
     "despill_strength": 0.5,
@@ -425,10 +426,16 @@ def configure_ai_model_cache() -> Path:
     return cache_dir
 
 
-def ai_components_for_matte_mode(matte_mode: str) -> list[str]:
+def ai_components_for_matte_mode(
+    matte_mode: str,
+    corridorkey_coarse_mask: str = "chroma",
+) -> list[str]:
     mode = normalize_matte_mode(str(matte_mode or ""), True)
     components = []
-    if mode in BIREFNET_MATTE_MODES:
+    if mode in BIREFNET_MATTE_MODES or (
+        mode in CORRIDORKEY_MATTE_MODES
+        and normalize_corridorkey_coarse_mask(corridorkey_coarse_mask) == "birefnet"
+    ):
         components.append("birefnet")
     if mode in CORRIDORKEY_MATTE_MODES:
         components.append("corridorkey")
@@ -467,8 +474,12 @@ def missing_ai_dependency_names() -> list[str]:
     return [name for name in required if importlib.util.find_spec(name) is None]
 
 
-def ai_model_install_status(matte_mode: str, model_key: str = DEFAULT_AI_MATTE_MODEL) -> dict:
-    components = ai_components_for_matte_mode(matte_mode)
+def ai_model_install_status(
+    matte_mode: str,
+    model_key: str = DEFAULT_AI_MATTE_MODEL,
+    corridorkey_coarse_mask: str = "chroma",
+) -> dict:
+    components = ai_components_for_matte_mode(matte_mode, corridorkey_coarse_mask)
     normalized_model_key = normalize_ai_model_key(model_key)
     dependencies_missing = missing_ai_dependency_names() if components else []
     models = {}
@@ -539,10 +550,11 @@ def install_ai_models_for_matte_mode(
     confirmed: bool,
     matte_mode: str,
     model_key: str = DEFAULT_AI_MATTE_MODEL,
+    corridorkey_coarse_mask: str = "chroma",
 ) -> dict:
     if confirmed is not True:
         raise ValueError("必须确认后才能安装 AI 模型。")
-    components = ai_components_for_matte_mode(matte_mode)
+    components = ai_components_for_matte_mode(matte_mode, corridorkey_coarse_mask)
     if not components:
         raise ValueError("当前抠图方法不需要安装 AI 模型。")
 
@@ -557,7 +569,7 @@ def install_ai_models_for_matte_mode(
             download_corridorkey_checkpoint("green")
             installed.append("corridorkey-green")
 
-        status = ai_model_install_status(matte_mode, model_key)
+        status = ai_model_install_status(matte_mode, model_key, corridorkey_coarse_mask)
         if not status["installed"]:
             raise RuntimeError("AI 模型安装未完成，请检查网络和磁盘空间后重试。")
         return {"installed_models": installed, "status": status}
@@ -801,6 +813,11 @@ def normalize_ai_device(raw: str) -> str:
 
 def normalize_corridorkey_screen(raw: str) -> str:
     return "green"
+
+
+def normalize_corridorkey_coarse_mask(raw: str) -> str:
+    value = str(raw or "chroma").strip().lower()
+    return value if value in CORRIDORKEY_COARSE_MASKS else "chroma"
 
 
 def normalize_corridorkey_options(raw: dict | None = None) -> dict:
@@ -2181,6 +2198,7 @@ def birefnet_alpha_mask(
     inference_resolution: int | str | None,
     solid_fallback_threshold: int = 42,
     solid_fallback_softness: int = 8,
+    allow_solid_fallback: bool = True,
 ) -> tuple[Image.Image, dict]:
     normalized_model_key = normalize_ai_model_key(model_key)
     resolution = resolve_ai_resolution(inference_resolution, image)
@@ -2193,16 +2211,17 @@ def birefnet_alpha_mask(
     info["solid_key_fallback"] = False
     info["solid_key_color"] = ""
 
-    solid_fallback = solid_background_fallback_alpha(
-        image,
-        score,
-        solid_fallback_threshold,
-        solid_fallback_softness,
-    )
-    if solid_fallback is not None:
-        solid_mask, solid_info = solid_fallback
-        info.update(solid_info)
-        return solid_mask, info
+    if allow_solid_fallback:
+        solid_fallback = solid_background_fallback_alpha(
+            image,
+            score,
+            solid_fallback_threshold,
+            solid_fallback_softness,
+        )
+        if solid_fallback is not None:
+            solid_mask, solid_info = solid_fallback
+            info.update(solid_info)
+            return solid_mask, info
 
     return mask, info
 
@@ -2484,6 +2503,7 @@ def apply_matte_pipeline(
     corridorkey_screen: str,
     manual_key_colors: list[str] | None = None,
     corridorkey_options: dict | None = None,
+    corridorkey_coarse_mask: str = "chroma",
 ) -> tuple[list[Image.Image], tuple[int, int, int], dict]:
     if not raw_images:
         raise ValueError("no frames to matte")
@@ -2501,6 +2521,7 @@ def apply_matte_pipeline(
     normalized_luma_polarity = normalize_luma_polarity(luma_polarity)
     resolved_luma_polarity = resolve_luma_polarity(normalized_luma_polarity, key_rgb)
     normalized_corridorkey_options = normalize_corridorkey_options(corridorkey_options)
+    normalized_corridorkey_coarse_mask = normalize_corridorkey_coarse_mask(corridorkey_coarse_mask)
     matte_info = {
         "mode": mode,
         "model_key": "",
@@ -2523,6 +2544,7 @@ def apply_matte_pipeline(
         "corridorkey_screen_color": "",
         "corridorkey_device": "",
         "corridorkey_resolution": 0,
+        "corridorkey_coarse_mask": normalized_corridorkey_coarse_mask if mode == "corridorkey" else "",
         "alpha_merge": "",
         "key_colors": [rgb_to_hex(color) for color in key_rgbs],
     }
@@ -2539,20 +2561,35 @@ def apply_matte_pipeline(
     if mode in {"chroma", "corridorkey"}:
         keyed_frames = []
         corridor_info: dict | None = None
+        coarse_ai_info: dict | None = None
+        resolved_ai_model = ai_model
         for raw_image in raw_images:
-            chroma_frame = chroma_key_frame(
-                image=raw_image,
-                key_rgb=key_rgb,
-                threshold=threshold,
-                softness=softness,
-                despill_strength=0.0,
-                halo_pixels=halo_pixels,
-                key_rgbs=key_rgbs if key_mode == "manual" else None,
-            )
+            if mode == "corridorkey" and normalized_corridorkey_coarse_mask == "birefnet":
+                coarse_alpha, coarse_ai_info = birefnet_alpha_mask(
+                    raw_image,
+                    resolved_ai_model,
+                    ai_device,
+                    ai_resolution,
+                    threshold,
+                    softness,
+                    allow_solid_fallback=False,
+                )
+                resolved_ai_model = update_ai_model_after_fallback(resolved_ai_model, coarse_ai_info)
+            else:
+                chroma_frame = chroma_key_frame(
+                    image=raw_image,
+                    key_rgb=key_rgb,
+                    threshold=threshold,
+                    softness=softness,
+                    despill_strength=0.0,
+                    halo_pixels=halo_pixels,
+                    key_rgbs=key_rgbs if key_mode == "manual" else None,
+                )
+                coarse_alpha = chroma_frame.getchannel("A")
             if mode == "corridorkey":
                 refined_frame, corridor_info = corridorkey_refine_frame(
                     raw_image,
-                    chroma_frame.getchannel("A"),
+                    coarse_alpha,
                     ai_device,
                     resolved_corridorkey_screen,
                     normalized_corridorkey_options,
@@ -2561,6 +2598,8 @@ def apply_matte_pipeline(
             else:
                 frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
                 keyed_frames.append(alpha_aware_despill_frame(raw_image, chroma_frame, frame_key_rgb))
+        if coarse_ai_info:
+            matte_info.update(coarse_ai_info)
         if corridor_info:
             matte_info.update(corridor_info)
         return keyed_frames, key_rgb, matte_info
@@ -2868,6 +2907,7 @@ def process_video_to_job(
     batch_semitransparent_to_opaque: bool = False,
     manual_key_colors: list[str] | None = None,
     corridorkey_options: dict | None = None,
+    corridorkey_coarse_mask: str = "chroma",
 ) -> dict:
     if preprocess_esr_smoothing:
         require_realesrgan_smoothing_ready()
@@ -2966,6 +3006,7 @@ def process_video_to_job(
         corridorkey_screen=corridorkey_screen,
         manual_key_colors=manual_key_colors,
         corridorkey_options=corridorkey_options,
+        corridorkey_coarse_mask=corridorkey_coarse_mask,
     )
     key_rgbs = [
         parse_hex_color(color)
@@ -3062,6 +3103,10 @@ def process_video_to_job(
             "despill_strength": despill_strength,
             "halo_pixels": halo_pixels,
             "corridorkey_enabled": matte_info["corridorkey_enabled"],
+            "corridorkey_coarse_mask": matte_info.get(
+                "corridorkey_coarse_mask",
+                normalize_corridorkey_coarse_mask(corridorkey_coarse_mask),
+            ),
             "corridorkey_screen": matte_info["corridorkey_screen_color"],
             "corridorkey_options": normalize_corridorkey_options(corridorkey_options),
             "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
@@ -3506,6 +3551,7 @@ def preview_frame(
     batch_semitransparent_to_opaque: bool = False,
     manual_key_colors: list[str] | None = None,
     corridorkey_options: dict | None = None,
+    corridorkey_coarse_mask: str = "chroma",
 ) -> dict:
     if preprocess_esr_smoothing:
         require_realesrgan_smoothing_ready()
@@ -3582,6 +3628,7 @@ def preview_frame(
         corridorkey_screen=corridorkey_screen,
         manual_key_colors=manual_key_colors,
         corridorkey_options=corridorkey_options,
+        corridorkey_coarse_mask=corridorkey_coarse_mask,
     )
     key_rgbs = [
         parse_hex_color(color)
@@ -3658,6 +3705,10 @@ def preview_frame(
             "despill_strength": despill_strength,
             "halo_pixels": halo_pixels,
             "corridorkey_enabled": matte_info["corridorkey_enabled"],
+            "corridorkey_coarse_mask": matte_info.get(
+                "corridorkey_coarse_mask",
+                normalize_corridorkey_coarse_mask(corridorkey_coarse_mask),
+            ),
             "corridorkey_screen": matte_info["corridorkey_screen_color"],
             "corridorkey_options": normalize_corridorkey_options(corridorkey_options),
             "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
@@ -5311,6 +5362,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 status = ai_model_install_status(
                     str(payload.get("matte_mode") or ""),
                     str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL),
+                    str(payload.get("corridorkey_coarse_mask") or "chroma"),
                 )
                 self.send_json({"ok": True, "status": status})
                 return
@@ -5320,6 +5372,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     confirmed=payload.get("confirmed") is True,
                     matte_mode=str(payload.get("matte_mode") or ""),
                     model_key=str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL),
+                    corridorkey_coarse_mask=str(payload.get("corridorkey_coarse_mask") or "chroma"),
                 )
                 self.send_json({"ok": True, "result": result})
                 return
@@ -5423,6 +5476,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     luma_polarity=normalize_luma_polarity(str(payload.get("luma_polarity") or "auto")),
                     corridorkey_enabled=bool(payload.get("corridorkey_enabled", False)),
                     corridorkey_screen=normalize_corridorkey_screen(str(payload.get("corridorkey_screen") or "auto")),
+                    corridorkey_coarse_mask=normalize_corridorkey_coarse_mask(
+                        str(payload.get("corridorkey_coarse_mask") or "chroma")
+                    ),
                     preprocess_esr_smoothing=bool(payload.get("preprocess_esr_smoothing", False)),
                     batch_background_to_black=bool(
                         payload.get("batch_background_to_black", payload.get("batch_green_to_black", False))
@@ -5465,6 +5521,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     luma_polarity=normalize_luma_polarity(str(payload.get("luma_polarity") or "auto")),
                     corridorkey_enabled=bool(payload.get("corridorkey_enabled", False)),
                     corridorkey_screen=normalize_corridorkey_screen(str(payload.get("corridorkey_screen") or "auto")),
+                    corridorkey_coarse_mask=normalize_corridorkey_coarse_mask(
+                        str(payload.get("corridorkey_coarse_mask") or "chroma")
+                    ),
                     preprocess_esr_smoothing=bool(payload.get("preprocess_esr_smoothing", False)),
                     batch_background_to_black=bool(
                         payload.get("batch_background_to_black", payload.get("batch_green_to_black", False))

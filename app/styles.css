@@ -820,6 +820,10 @@ button:focus-visible,
   display: none;
 }
 
+.corridor-seed-only {
+  display: none;
+}
+
 .corridor-settings-grid > .field:has(#corridorScreenInput),
 .corridor-settings-grid > .field:has(#corridorColorSpaceInput) {
   display: none;
@@ -1106,9 +1110,9 @@ button:focus-visible,
 
 .quick-reference-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .quick-reference-section {
@@ -1120,7 +1124,7 @@ button:focus-visible,
 }
 
 .quick-reference-wide {
-  grid-column: 1 / -1;
+  grid-column: auto;
 }
 
 .quick-reference-section h4 {
@@ -1137,7 +1141,7 @@ button:focus-visible,
 
 .quick-reference-modes,
 .quick-reference-exports {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
 }
 
 .quick-reference-list > div {
@@ -1145,9 +1149,7 @@ button:focus-visible,
   border-top: 1px dashed rgba(5, 5, 5, 0.24);
 }
 
-.quick-reference-list > div:first-child,
-.quick-reference-modes > div:nth-child(2),
-.quick-reference-exports > div:nth-child(2) {
+.quick-reference-list > div:first-child {
   padding-top: 0;
   border-top: 0;
 }
@@ -2432,12 +2434,6 @@ button:focus-visible,
 
   .quick-reference-intro span {
     text-align: left;
-  }
-
-  .quick-reference-modes > div:nth-child(2),
-  .quick-reference-exports > div:nth-child(2) {
-    padding-top: 7px;
-    border-top: 1px dashed rgba(5, 5, 5, 0.24);
   }
 
   .import-grid,

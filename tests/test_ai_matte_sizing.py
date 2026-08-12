@@ -15,6 +15,13 @@ class AiMatteSizingTests(unittest.TestCase):
         self.assertEqual(server.normalize_matte_mode("corridorkey", True), "corridorkey")
         self.assertEqual(server.ai_components_for_matte_mode("corridorkey"), ["corridorkey"])
 
+    def test_corridorkey_with_birefnet_coarse_mask_requires_both_models(self):
+        self.assertEqual(
+            server.ai_components_for_matte_mode("corridorkey", "birefnet"),
+            ["birefnet", "corridorkey"],
+        )
+        self.assertEqual(server.normalize_corridorkey_coarse_mask("unknown"), "chroma")
+
     def test_removed_advanced_modes_migrate_to_the_nearest_kept_mode(self):
         self.assertEqual(
             server.normalize_matte_mode("birefnet_corridorkey_key", True),
@@ -195,6 +202,65 @@ class AiMatteSizingTests(unittest.TestCase):
         self.assertEqual(observed["options"]["despill_strength"], 0.25)
         self.assertEqual(observed["options"]["refiner_scale"], 1.5)
         self.assertTrue(info["corridorkey_enabled"])
+
+    def test_corridorkey_can_use_birefnet_as_its_coarse_mask(self):
+        raw = Image.new("RGBA", (2, 1), (20, 180, 60, 255))
+        biref_alpha = Image.new("L", raw.size)
+        biref_alpha.putdata([24, 220])
+        corridor_result = Image.new("RGBA", raw.size, (90, 100, 110, 180))
+        observed = {}
+
+        def fake_corridor(_image, alpha, _device, _screen, _options):
+            observed["alpha"] = list(alpha.getdata())
+            return corridor_result, {
+                "corridorkey_enabled": True,
+                "corridorkey_screen_color": "green",
+            }
+
+        with (
+            mock.patch.object(
+                server,
+                "birefnet_alpha_mask",
+                return_value=(
+                    biref_alpha,
+                    {
+                        "model_key": "birefnet-hr-matting",
+                        "model_label": "BiRefNet HR-matting",
+                    },
+                ),
+            ) as birefnet,
+            mock.patch.object(server, "chroma_key_frame") as chroma,
+            mock.patch.object(server, "corridorkey_refine_frame", side_effect=fake_corridor),
+        ):
+            frames, _key, info = server.apply_matte_pipeline(
+                raw_images=[raw],
+                chroma_enabled=True,
+                matte_mode="corridorkey",
+                key_mode="auto",
+                manual_key_hex="#00FF00",
+                threshold=35,
+                softness=16,
+                despill_strength=0.6,
+                halo_pixels=1,
+                ai_model="birefnet-hr-matting",
+                ai_device="auto",
+                ai_resolution="auto",
+                luma_black=0,
+                luma_white=85,
+                luma_gamma=0.55,
+                luma_strength=1.7,
+                luma_polarity="auto",
+                corridorkey_enabled=True,
+                corridorkey_screen="green",
+                corridorkey_coarse_mask="birefnet",
+            )
+
+        self.assertFalse(birefnet.call_args.kwargs["allow_solid_fallback"])
+        chroma.assert_not_called()
+        self.assertEqual(observed["alpha"], [24, 220])
+        self.assertEqual(frames[0].getchannel("A").getpixel((0, 0)), 180)
+        self.assertEqual(info["corridorkey_coarse_mask"], "birefnet")
+        self.assertEqual(info["model_key"], "birefnet-hr-matting")
 
     def test_alpha_aware_despill_recovers_edge_color_without_changing_alpha(self):
         key_rgb = (14, 129, 64)
@@ -396,6 +462,26 @@ class AiMatteSizingTests(unittest.TestCase):
             result["installed_models"],
             ["corridorkey-green"],
         )
+
+    def test_ai_model_install_adds_hr_matting_for_corridorkey_birefnet_coarse_mask(self):
+        completed_status = {"installed": True}
+        with (
+            mock.patch.object(server, "require_ai_runtime_for_components") as require_runtime,
+            mock.patch.object(server, "download_birefnet_model") as download_birefnet,
+            mock.patch.object(server, "download_corridorkey_checkpoint") as download_corridorkey,
+            mock.patch.object(server, "ai_model_install_status", return_value=completed_status),
+        ):
+            result = server.install_ai_models_for_matte_mode(
+                True,
+                "corridorkey",
+                "birefnet-hr-matting",
+                "birefnet",
+            )
+
+        require_runtime.assert_called_once_with(["birefnet", "corridorkey"])
+        download_birefnet.assert_called_once_with("birefnet-hr-matting")
+        download_corridorkey.assert_called_once_with("green")
+        self.assertEqual(result["installed_models"], ["birefnet-hr-matting", "corridorkey-green"])
 
     def test_ai_model_install_only_downloads_hr_matting_for_birefnet(self):
         completed_status = {"installed": True}

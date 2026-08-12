@@ -262,6 +262,15 @@
                     <span>背景目标</span>
                   </div>
                   <div class="form-grid">
+                    <label class="field corridor-seed-only">
+                      <span>粗遮罩来源</span>
+                      <select id="corridorCoarseMaskInput">
+                        <option value="chroma" selected>Chroma</option>
+                        <option value="birefnet">BiRefNet</option>
+                      </select>
+                      <small>先生成主体粗遮罩，再交给 CorridorKey 重建边缘和去溢色。</small>
+                    </label>
+
                     <label class="field chroma-only">
                       <span>背景色</span>
                       <select id="keyModeInput">

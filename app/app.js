@@ -218,6 +218,7 @@ function bindElements() {
     "haloInput",
     "birefnetEdgeShrinkInput",
     "corridorEnabledInput",
+    "corridorCoarseMaskInput",
     "corridorScreenInput",
     "corridorColorSpaceInput",
     "corridorDespillInput",
@@ -596,6 +597,7 @@ function bindEvents() {
     }
   });
   els.corridorEnabledInput.addEventListener("change", updateChromaVisibility);
+  els.corridorCoarseMaskInput.addEventListener("change", handleCorridorCoarseMaskChange);
   els.corridorDespillInput.addEventListener("input", syncCorridorControlState);
   els.corridorRefinerInput.addEventListener("input", syncCorridorControlState);
   els.corridorDespeckleEnabledInput.addEventListener("change", syncCorridorControlState);
@@ -1100,8 +1102,8 @@ function matteModeUsesLuma(mode) {
   return mode === "luma";
 }
 
-function matteModeUsesChromaSeed(mode) {
-  return mode === "chroma" || mode === "corridorkey";
+function matteModeUsesChromaSeed(mode, corridorkeyCoarseMask = els.corridorCoarseMaskInput.value) {
+  return mode === "chroma" || (mode === "corridorkey" && corridorkeyCoarseMask !== "birefnet");
 }
 
 function matteModeRequiresAiModel(mode) {
@@ -1113,6 +1115,7 @@ function aiModelRequestPayload(mode) {
     matte_mode: mode,
     ai_model: els.aiModelInput.value,
     ai_device: els.aiDeviceInput.value,
+    corridorkey_coarse_mask: els.corridorCoarseMaskInput.value,
   };
 }
 
@@ -1190,6 +1193,22 @@ async function handleMatteModeChange() {
     persistSession();
   }
   els.matteModeInput.disabled = false;
+}
+
+async function handleCorridorCoarseMaskChange() {
+  els.corridorCoarseMaskInput.value =
+    els.corridorCoarseMaskInput.value === "birefnet" ? "birefnet" : "chroma";
+  updateChromaVisibility();
+  els.corridorCoarseMaskInput.disabled = true;
+  const ready = await ensureAiModelsReady("corridorkey");
+  if (!ready) {
+    els.corridorCoarseMaskInput.value = "chroma";
+    updateChromaVisibility();
+  }
+  els.corridorCoarseMaskInput.disabled = false;
+  persistSession();
+  markCorridorPreviewStale();
+  scheduleCorridorLivePreview(0);
 }
 
 function aiLivePreviewEnabled() {
@@ -1292,6 +1311,7 @@ function collectFormState() {
     halo_pixels: currentMatteMode() === "birefnet" ? 0 : Number(els.haloInput.value || 0),
     birefnet_edge_shrink: 0,
     corridorkey_enabled: currentUsesCorridorKey(),
+    corridorkey_coarse_mask: els.corridorCoarseMaskInput.value,
     corridorkey_screen: "green",
     corridorkey_color_space: "srgb",
     corridorkey_despill_strength: Number(els.corridorDespillInput.value || 0),
@@ -1367,6 +1387,7 @@ function collectProcessingPayload() {
     halo_pixels: currentMatteMode() === "birefnet" ? 0 : Number(els.haloInput.value || 0),
     birefnet_edge_shrink: 0,
     corridorkey_enabled: currentUsesCorridorKey(),
+    corridorkey_coarse_mask: els.corridorCoarseMaskInput.value,
     corridorkey_screen: "green",
     corridorkey_color_space: "srgb",
     corridorkey_despill_strength: Number(els.corridorDespillInput.value || 0),
@@ -1441,6 +1462,7 @@ function applyFormState(snapshot) {
   }
   applyMatteThreshold(currentMatteMode());
   els.corridorEnabledInput.checked = currentUsesCorridorKey();
+  els.corridorCoarseMaskInput.value = snapshot.corridorkey_coarse_mask === "birefnet" ? "birefnet" : "chroma";
   if (
     snapshot.corridorkey_screen &&
     [...els.corridorScreenInput.options].some((option) => option.value === snapshot.corridorkey_screen)
@@ -1855,20 +1877,27 @@ function formatMatteDetail(matte) {
     return "";
   }
   const parts = [];
-  if (matteModeUsesBiRefNet(matte.mode) && matte.model_label) {
+  const usesBirefnetCoarseMask =
+    matte.mode === "corridorkey" && matte.corridorkey_coarse_mask === "birefnet";
+  if ((matteModeUsesBiRefNet(matte.mode) || usesBirefnetCoarseMask) && matte.model_label) {
     parts.push(matte.model_label);
   }
   if (matteModeUsesLuma(matte.mode) && matte.luma_enabled) {
     parts.push(matte.luma_resolved_polarity === "dark" ? "\u53BB\u767D\u5E95" : "\u53BB\u9ED1\u5E95");
   }
   if (matte.resolution) {
-    parts.push(matteModeUsesBiRefNet(matte.mode) ? `AI ${matte.resolution}px` : `${matte.resolution}px`);
+    parts.push(
+      matteModeUsesBiRefNet(matte.mode) || usesBirefnetCoarseMask
+        ? `AI ${matte.resolution}px`
+        : `${matte.resolution}px`
+    );
   }
   if (matte.solid_key_fallback && matte.solid_key_color) {
     parts.push(`\u8272\u952e\u515c\u5e95 ${matte.solid_key_color}`);
   }
   if (matte.corridorkey_enabled) {
     const screen = formatCorridorScreenLabel(matte.corridorkey_screen_color);
+    const coarseMask = matte.corridorkey_coarse_mask === "birefnet" ? "BiRefNet" : "Chroma";
     const device = matte.corridorkey_device ? ` / ${matte.corridorkey_device}` : "";
     const despill = Number.isFinite(Number(matte.corridorkey_despill_strength))
       ? ` / \u8FB9\u7F18\u53BB\u6EA2\u8272 ${Number(matte.corridorkey_despill_strength).toFixed(2)}`
@@ -1876,7 +1905,7 @@ function formatMatteDetail(matte) {
     const refiner = Number.isFinite(Number(matte.corridorkey_refiner_scale))
       ? ` / \u7EC6\u5316 ${Number(matte.corridorkey_refiner_scale).toFixed(2)}`
       : "";
-    parts.push(`EZ CorridorKey ${screen}${device}${despill}${refiner}`);
+    parts.push(`EZ CorridorKey ${screen} / 粗遮罩 ${coarseMask}${device}${despill}${refiner}`);
   }
   if (matte.alpha_aware_despill) {
     parts.push("\u81EA\u52A8 alpha-aware \u53BB\u6EA2\u8272");
@@ -2255,7 +2284,7 @@ function renderProcessPreview({ preserveView = false } = {}) {
   const previewKeyColors = Array.isArray(state.processPreview.key_colors) && state.processPreview.key_colors.length > 0
     ? state.processPreview.key_colors
     : [state.processPreview.key_color || "-"];
-  const chromaDetail = matteModeUsesChromaSeed(matte.mode)
+  const chromaDetail = matteModeUsesChromaSeed(matte.mode, matte.corridorkey_coarse_mask)
     ? previewKeyColors.length > 1
       ? ` / \u80CC\u666F\u8272\u6837 ${previewKeyColors.length} \u4E2A`
       : ` / \u80CC\u666F\u8272 ${previewKeyColors[0]}`
@@ -3820,6 +3849,7 @@ function updateChromaVisibility() {
   const isAi = chromaEnabled && matteModeUsesBiRefNet(matteMode);
   const isLuma = chromaEnabled && matteModeUsesLuma(matteMode);
   const isCorridor = chromaEnabled && matteModeUsesCorridorKey(matteMode);
+  const corridorUsesChroma = isCorridor && els.corridorCoarseMaskInput.value === "chroma";
   const usesAiLivePreview = isAi || isCorridor;
   const usesSpillControls = chromaEnabled;
   const usesKeyColorControls = isChroma;
@@ -3837,11 +3867,11 @@ function updateChromaVisibility() {
     node.style.display = isChroma ? "" : "none";
   });
   document.querySelectorAll(".chroma-guide-only").forEach((node) => {
-    node.style.display = isChroma || isCorridor ? "" : "none";
+    node.style.display = isChroma || corridorUsesChroma ? "" : "none";
   });
   els.thresholdInput.setAttribute(
     "aria-label",
-    isCorridor ? "CorridorKey 粗遮罩容差" : "Chroma 背景色容差"
+    corridorUsesChroma ? "CorridorKey Chroma 粗遮罩容差" : "Chroma 背景色容差"
   );
   document.querySelectorAll(".spill-matte-only").forEach((node) => {
     node.style.display = usesSpillControls ? "" : "none";
@@ -3857,6 +3887,9 @@ function updateChromaVisibility() {
   });
   document.querySelectorAll(".corridor-key-only").forEach((node) => {
     node.style.display = isCorridor ? "block" : "none";
+  });
+  document.querySelectorAll(".corridor-seed-only").forEach((node) => {
+    node.style.display = isCorridor ? "grid" : "none";
   });
   syncCorridorControlState();
   syncBirefnetControlState();
@@ -3876,6 +3909,7 @@ function updateChromaVisibility() {
 function syncCorridorControlState() {
   const despill = clamp(Number(els.corridorDespillInput.value || 0), 0, 1);
   const refiner = clamp(Number(els.corridorRefinerInput.value || 0), 0, 3);
+  const coarseMaskLabel = els.corridorCoarseMaskInput.value === "birefnet" ? "BiRefNet 粗遮罩" : "Chroma 粗遮罩";
   els.corridorDespillInput.value = String(despill);
   els.corridorRefinerInput.value = String(refiner);
   els.corridorDespillValueLabel.textContent = despill.toFixed(2);
@@ -3889,7 +3923,7 @@ function syncCorridorControlState() {
     ? `遮罩 ${Number(els.corridorGarbagePixelsInput.value || 0)} px`
     : "遮罩关";
   els.corridorSettingsSummaryValue.textContent =
-    `去溢色 ${despill.toFixed(2)} · 细化 ${refiner.toFixed(2)} · ${despeckleSummary} · ${garbageSummary}`;
+    `${coarseMaskLabel} · 去溢色 ${despill.toFixed(2)} · 细化 ${refiner.toFixed(2)} · ${despeckleSummary} · ${garbageSummary}`;
 }
 
 function syncBirefnetControlState() {

@@ -40,7 +40,7 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - Chroma、Luma 和 BiRefNet 会在最终 alpha 上执行 alpha-aware 去溢色；CorridorKey 直接使用 EZ-CorridorKey 的前景重建与去溢色输出。
 - BiRefNet AI 主体抠图。
 - Luma 亮度抠图，用来保留发光、火焰、闪电、粒子和亮部 VFX。
-- EZ-CorridorKey 绿幕处理，提供去溢色、去散点、垃圾遮罩和边缘细化参数。
+- EZ-CorridorKey 绿幕处理，可选择 Chroma 或 BiRefNet 生成粗遮罩，再执行去溢色、去散点、垃圾遮罩和边缘细化。
 - 单帧预览支持原始抽帧全分辨率查看，处理后预览可切换棋盘格或指定纯色背景。
 - 预览和批处理后处理：按照当前自动识别或手动指定的背景色处理残留（支持绿色、洋红等颜色），可将背景残留转黑或把饱和度归零；另支持半透明像素涂黑、半透明像素转不透明。
 - BiRefNet 固定使用质量优先的 HR-matting 模型；纯色背景弱蒙版仍可使用内置色键兜底。
@@ -77,7 +77,7 @@ Sprite Video Lab 目前提供这些背景处理模式：
 - `Chroma`：快速处理受控纯色背景，适合绿幕、蓝幕、白底、灰底等素材。
 - `Luma`：基于亮度生成 alpha，适合亮部特效、火焰、闪电、粒子等素材。
 - `BiRefNet`：AI 主体抠图，适合非纯色背景或生成图背景。
-- `CorridorKey`：处理标准绿幕，使用 EZ-CorridorKey 重建前景颜色、细化 alpha 并执行幕布去溢色。
+- `CorridorKey`：处理标准绿幕，可选择 Chroma 或 BiRefNet 作为粗遮罩，再使用 EZ-CorridorKey 重建前景颜色、细化 alpha 并执行幕布去溢色。
 - `不抠图`：保持原始画面，仅执行尺寸调整和批处理后处理。
 
 灰底、白底、黑底和蓝幕素材优先使用 `Chroma`；需要重建绿幕边缘时选择 `CorridorKey`。
