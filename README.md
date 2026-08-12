@@ -36,14 +36,14 @@ Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图
 - 批处理前先单帧预览参数效果。
 - 默认保留源视频/图片画布，方便后续动画对齐。
 - 纯色/绿幕抠图，程序自动处理阈值、软边、去色溢出和边缘收缩。
-- Chroma、Luma 和不含 CorridorKey 的 BiRefNet 模式会在最终 alpha 上自动执行 alpha-aware 去溢色；CorridorKey 模式保持源图可见 RGB 不变。
+- 纯 Chroma 模式可从源画面或色板添加最多 12 个色样，手动模式默认不预置颜色且允许删空；0–180 容差滑条使用浏览器本地像素计算即时刷新，不重置预览缩放、平移或页面位置，其他模式不开放手动背景色与容差。
+- Chroma、Luma 和 BiRefNet 会在最终 alpha 上执行 alpha-aware 去溢色；CorridorKey 直接使用 EZ-CorridorKey 的前景重建与去溢色输出。
 - BiRefNet AI 主体抠图。
 - Luma 亮度抠图，用来保留发光、火焰、闪电、粒子和亮部 VFX。
-- CorridorKey 绿幕/蓝幕遮罩处理。
-- Chroma、Luma、CorridorKey 与 BiRefNet 的组合模式只做遮罩并集补全，不再提供“收紧抠图”模式。
+- EZ-CorridorKey 绿幕处理，提供去溢色、去散点、垃圾遮罩和边缘细化参数。
 - 单帧预览支持原始抽帧全分辨率查看，处理后预览可切换棋盘格或指定纯色背景。
 - 预览和批处理后处理：按照当前自动识别或手动指定的背景色处理残留（支持绿色、洋红等颜色），可将背景残留转黑或把饱和度归零；另支持半透明像素涂黑、半透明像素转不透明。
-- BiRefNet 弱蒙版会自动回退到 general 模型，避免小尺寸插画/GIF 被抠成全透明。
+- BiRefNet 固定使用质量优先的 HR-matting 模型；纯色背景弱蒙版仍可使用内置色键兜底。
 - 可直接导入已有动画序列帧，按文件名顺序预览和导出。
 - 实验性线稿清理页：支持 Lanczos 缩小和 Real-ESRGAN anime 整线后缩小。
 - 反向动画预览和反向导出。
@@ -77,12 +77,10 @@ Sprite Video Lab 目前提供这些背景处理模式：
 - `Chroma`：快速处理受控纯色背景，适合绿幕、蓝幕、白底、灰底等素材。
 - `Luma`：基于亮度生成 alpha，适合亮部特效、火焰、闪电、粒子等素材。
 - `BiRefNet`：AI 主体抠图，适合非纯色背景或生成图背景。
-- `CorridorKey`：处理标准绿幕或蓝幕，最终 alpha 只取 CorridorKey 输出。
-- `Chroma + BiRef 补主体`：合并 Chroma 与 BiRefNet alpha，由 BiRefNet 补回主体内部与背景键色相同而被 Chroma 错抠的区域。
-- `BiRef + Corridor 补全`：合并 BiRefNet 与 CorridorKey alpha；CorridorKey 只补回内容，不能删除 BiRefNet 已保留的区域。
-- `BiRef + Luma 补亮部`：合并 BiRefNet 与亮度 alpha，补回火焰、闪电、粒子等亮部。
+- `CorridorKey`：处理标准绿幕，使用 EZ-CorridorKey 重建前景颜色、细化 alpha 并执行幕布去溢色。
+- `不抠图`：保持原始画面，仅执行尺寸调整和批处理后处理。
 
-灰底、白底、黑底素材优先使用 `chroma key`；需要重建绿幕/蓝幕边缘时，再选择包含 CorridorKey 的处理方式。
+灰底、白底、黑底和蓝幕素材优先使用 `Chroma`；需要重建绿幕边缘时选择 `CorridorKey`。
 
 ## 环境要求
 
@@ -97,7 +95,7 @@ Sprite Video Lab 目前提供这些背景处理模式：
   - timm 和相关图片依赖
   - CorridorKey 依赖，例如 `safetensors`、OpenCV、NumPy
 
-基础功能只需要 `requirements.txt`。BiRefNet、Luma 组合和 CorridorKey 相关能力需要 `requirements-ai.txt` 里的可选依赖。
+基础功能只需要 `requirements.txt`。BiRefNet 和 CorridorKey 相关能力需要 `requirements-ai.txt` 里的可选依赖。
 
 ## 安装
 
@@ -178,8 +176,8 @@ work/                             运行时输出目录，已被 git 忽略
 
 - 不要把 `work/`、生成帧、测试视频、模型缓存和虚拟环境提交到 git。
 - 便携包不预装 AI 模型权重；普通色键和 Luma 流程不会下载模型。
-- 第一次选择 BiRefNet 或 CorridorKey 抠图方式时，页面会先弹出确认框，只有确认后才安装所需模型。
-- BiRefNet 通过 Hugging Face 的 `trust_remote_code=True` 加载远程模型代码；如果需要更严格的供应链控制，请审查并固定模型 revision。
+- 第一次选择 BiRefNet 或 CorridorKey 抠图方式时，页面会先弹出确认框，只有确认后才安装所需模型。BiRefNet 只下载 HR-matting 必需文件，CorridorKey 只下载绿幕 checkpoint。
+- BiRefNet 通过 Hugging Face 的 `trust_remote_code=True` 加载模型代码；当前 HR-matting 模型和 EZ-CorridorKey 源码、绿幕 checkpoint 均固定到已验证 revision，升级时应显式修改并重新测试。
 - CorridorKey 是独立项目，重新分发或用于商业推理服务前请确认它的许可证。
 
 ## License

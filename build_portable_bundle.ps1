@@ -122,8 +122,8 @@ Get-ChildItem -LiteralPath $ffmpegRootResolved -Filter *.exe | ForEach-Object {
 Write-Host "Copying AI support files without model weights..."
 $portableModelRoot = Join-Path $modelsRuntimeRoot "portable-models"
 Ensure-Directory -PathValue $portableModelRoot
-Copy-Tree -Source (Join-Path $modelRootResolved "CorridorKey") -Destination $portableModelRoot
-$portableCheckpointRoot = Join-Path $portableModelRoot "CorridorKey\CorridorKeyModule\checkpoints"
+Copy-Tree -Source (Join-Path $modelRootResolved "EZ-CorridorKey") -Destination $portableModelRoot
+$portableCheckpointRoot = Join-Path $portableModelRoot "EZ-CorridorKey\CorridorKeyModule\checkpoints"
 if (Test-Path -LiteralPath $portableCheckpointRoot) {
     Get-ChildItem -LiteralPath $portableCheckpointRoot -File -Force |
         Where-Object { $_.Name -ne ".gitkeep" } |

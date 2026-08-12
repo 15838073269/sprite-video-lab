@@ -123,9 +123,14 @@
           </div>
 
           <div class="preview-layout">
-            <div class="video-wrap">
+            <div id="videoWrap" class="video-wrap">
               <video id="videoPreview" playsinline muted></video>
               <img id="mediaPreviewImage" alt="源图预览" hidden>
+              <div id="keySampleMarkers" class="key-sample-markers" aria-hidden="true"></div>
+              <div id="keySamplingOverlay" class="key-sampling-overlay" hidden>
+                <span>取色中</span>
+                <strong>点击画面添加背景色</strong>
+              </div>
             </div>
 
             <div class="segment-panel">
@@ -219,10 +224,8 @@
                           <div><dt>Chroma</dt><dd>绿幕、蓝幕、白底、灰底等受控纯色背景，速度最快。</dd></div>
                           <div><dt>Luma</dt><dd>黑底或白底的火焰、闪电、粒子和亮部 VFX。</dd></div>
                           <div><dt>BiRefNet</dt><dd>真实背景或 AI 生成背景，主体轮廓明确时使用。</dd></div>
-                          <div><dt>CorridorKey</dt><dd>标准绿幕或蓝幕，由 CorridorKey 输出最终遮罩。</dd></div>
-                          <div><dt>Chroma + BiRef 补主体</dt><dd>Chroma 负责去背景，BiRefNet 补回主体内部与背景键色相同而被错抠的区域。</dd></div>
-                          <div><dt>BiRef + Corridor 补全</dt><dd>BiRefNet 选择主体，CorridorKey 只补回其确认不该抠除的区域。</dd></div>
-                          <div><dt>BiRef + Luma 补亮部</dt><dd>保住主体，同时补回火焰、闪电、粒子等亮部。</dd></div>
+                          <div><dt>CorridorKey</dt><dd>标准绿幕，使用 EZ-CorridorKey 重建前景、细化遮罩并去除幕布溢色；蓝幕请使用 Chroma。</dd></div>
+                          <div><dt>不抠图</dt><dd>保留原始画面，只执行后续尺寸与批处理。</dd></div>
                         </dl>
                       </section>
 
@@ -247,9 +250,7 @@
                         <option value="luma">Luma</option>
                         <option value="birefnet">BiRefNet</option>
                         <option value="corridorkey">CorridorKey</option>
-                        <option value="chroma_birefnet">Chroma + BiRef 补主体</option>
-                        <option value="birefnet_corridorkey">BiRef + Corridor 补全</option>
-                        <option value="birefnet_luma">BiRef + Luma 补亮部</option>
+                        <option value="none">不抠图</option>
                       </select>
                       <small>选处理方式即可，细节由程序自动处理。</small>
                     </label>
@@ -269,13 +270,34 @@
                       </select>
                     </label>
 
-                    <label id="manualColorField" class="field manual-color-field">
-                      <span>指定颜色</span>
-                      <div class="color-field">
-                        <input id="manualKeyInput" type="color" value="#00ff00">
-                        <strong id="manualKeyLabel">#00FF00</strong>
+                    <div id="manualColorField" class="field manual-color-field">
+                      <div class="manual-color-title">
+                        <span>背景色样</span>
+                        <strong id="manualKeySampleCount">0 / 12</strong>
                       </div>
-                    </label>
+                      <div class="color-field">
+                        <input id="manualKeyInput" class="palette-color-input" type="color" value="#00ff00" tabindex="-1" aria-label="选择要添加的背景色">
+                        <strong id="manualKeyLabel" hidden>#00FF00</strong>
+                        <button id="addPaletteKeyColorButton" class="ghost-button compact-button" type="button">从色板添加</button>
+                        <button id="keySamplingToggleButton" class="ghost-button compact-button" type="button">从画面添加</button>
+                        <button id="clearExtraKeySamplesButton" class="text-button" type="button">清空色样</button>
+                      </div>
+                      <div id="manualKeySamples" class="manual-key-samples" aria-live="polite"></div>
+                      <small>色板只选择候选颜色，点击添加后才会生效；色样可全部删除。</small>
+                    </div>
+
+                    <div id="chromaToleranceField" class="field chroma-guide-only chroma-tolerance-field">
+                      <div class="tolerance-title">
+                        <span>容差</span>
+                        <strong id="thresholdValueLabel">80</strong>
+                      </div>
+                      <input id="thresholdInput" type="range" min="0" max="180" step="1" value="80" aria-label="Chroma 背景色容差">
+                      <div class="tolerance-scale" aria-hidden="true">
+                        <span>更精准</span>
+                        <span>抠除更宽</span>
+                      </div>
+                      <small>色差较小时用较低值；仍有背景残留时逐步调高。</small>
+                    </div>
 
                     <label class="field luma-matte-only">
                       <span>Luma 背景</span>
@@ -288,17 +310,96 @@
                   </div>
                 </div>
 
+                <details id="corridorKeySettings" class="control-group corridor-key-only corridor-settings-disclosure">
+                  <summary class="corridor-settings-summary">
+                    <span class="corridor-settings-heading">
+                      <strong>EZ CorridorKey</strong>
+                      <small>高级参数</small>
+                    </span>
+                    <span id="corridorSettingsSummaryValue" class="corridor-settings-summary-value"></span>
+                    <span class="corridor-settings-toggle-label" aria-hidden="true"></span>
+                  </summary>
+                  <div class="corridor-settings-body">
+                    <div class="form-grid corridor-settings-grid">
+                    <label class="field">
+                      <span>幕布颜色</span>
+                      <select id="corridorScreenInput">
+                        <option value="green" selected>绿色</option>
+                      </select>
+                    </label>
+
+                    <label class="field">
+                      <span>输入色彩空间</span>
+                      <select id="corridorColorSpaceInput">
+                        <option value="srgb" selected>sRGB</option>
+                        <option value="linear">Linear</option>
+                      </select>
+                    </label>
+
+                    <div class="field corridor-slider-field">
+                      <div class="tolerance-title">
+                        <span>边缘去溢色</span>
+                        <strong id="corridorDespillValueLabel">0.50</strong>
+                      </div>
+                      <input id="corridorDespillInput" type="range" min="0" max="1" step="0.05" value="0.5">
+                      <div class="tolerance-scale" aria-hidden="true">
+                        <span>保留边缘原色</span>
+                        <span>边缘去色更强</span>
+                      </div>
+                    </div>
+
+                    <div class="field corridor-slider-field">
+                      <div class="tolerance-title">
+                        <span>边缘细化</span>
+                        <strong id="corridorRefinerValueLabel">1.00</strong>
+                      </div>
+                      <input id="corridorRefinerInput" type="range" min="0" max="3" step="0.05" value="1">
+                      <div class="tolerance-scale" aria-hidden="true">
+                        <span>关闭细化</span>
+                        <span>细化更强</span>
+                      </div>
+                    </div>
+
+                    <div class="field corridor-option-field">
+                      <label class="checkbox-row corridor-option-toggle">
+                        <input id="corridorDespeckleEnabledInput" type="checkbox" checked>
+                        <span>去除散点</span>
+                      </label>
+                      <label class="compact-number-field" for="corridorDespeckleSizeInput">
+                        <span>保留面积达到</span>
+                        <input id="corridorDespeckleSizeInput" type="number" min="0" max="999999" step="1" value="400">
+                        <span>px</span>
+                      </label>
+                      <small>删除小于该面积的断开杂点；细发丝丢失时降低数值。</small>
+                    </div>
+
+                    <div class="field corridor-option-field">
+                      <label class="checkbox-row corridor-option-toggle">
+                        <input id="corridorGarbageEnabledInput" type="checkbox">
+                        <span>垃圾遮罩</span>
+                      </label>
+                      <label class="compact-number-field" for="corridorGarbagePixelsInput">
+                        <span>向外保留</span>
+                        <input id="corridorGarbagePixelsInput" type="number" min="1" max="500" step="1" value="20" disabled>
+                        <span>px</span>
+                      </label>
+                      <small>清除初始遮罩范围之外的背景脏点；默认关闭。</small>
+                    </div>
+                    </div>
+                    <div class="corridor-preview-actions">
+                      <span id="corridorPreviewState" class="corridor-preview-state" data-state="empty">尚未预览</span>
+                    </div>
+                  </div>
+                </details>
+
                 <div class="hidden-runtime-controls" hidden>
-                  <input id="thresholdInput" type="hidden" value="80">
                   <input id="softnessInput" type="hidden" value="16">
                   <input id="despillInput" type="hidden" value="0.6">
                   <input id="haloInput" type="hidden" value="1">
+                  <input id="birefnetEdgeShrinkInput" type="hidden" value="0">
+                  <span id="birefnetEdgeShrinkValueLabel"></span>
+                  <span id="birefnetPreviewState" data-state="empty"></span>
                   <input id="corridorEnabledInput" type="checkbox">
-                  <select id="corridorScreenInput" aria-label="幕布颜色">
-                    <option value="auto" selected>自动</option>
-                    <option value="green">绿色</option>
-                    <option value="blue">蓝色</option>
-                  </select>
                   <select id="aiModelInput" aria-label="AI 模型">
                     <option value="birefnet-hr-matting" selected>BiRefNet HR-matting</option>
                   </select>
@@ -314,11 +415,11 @@
                   <input id="lumaStrengthInput" type="hidden" value="1.7">
                 </div>
 
-                <div class="control-group">
+                <div class="control-group batch-postprocess-group">
                   <div class="group-title">
-                    <span>批处理后处理</span>
+                    <span>后处理</span>
                   </div>
-                  <div class="check-stack">
+                  <div class="check-stack compact-check-grid">
                     <label class="checkbox-row">
                       <input id="batchBackgroundToBlackInput" type="checkbox">
                       <span>背景残留转黑</span>
@@ -357,6 +458,10 @@
                         <strong>先做平滑处理</strong>
                         <small>ESR x4 → 原尺寸 → 抠图</small>
                       </span>
+                    </label>
+                    <label id="aiLivePreviewOption" class="ai-live-preview-option" hidden>
+                      <input id="aiLivePreviewInput" type="checkbox">
+                      <span>即时预览</span>
                     </label>
                     <button id="previewFrameButton" class="primary-button" type="button">预览当前帧</button>
                     <button id="processButton" class="primary-button large" type="button">开始处理区间</button>
@@ -416,11 +521,7 @@
                     </label>
                   </div>
                   <div class="postprocess-actions">
-                    <button id="backgroundToBlackButton" class="ghost-button" type="button" hidden>背景残留转黑</button>
-                    <button id="backgroundDesaturateButton" class="ghost-button" type="button" hidden>背景残留饱和度归零</button>
-                    <button id="semiTransparentToBlackButton" class="ghost-button" type="button" hidden>半透明转黑</button>
-                    <button id="semiTransparentToOpaqueButton" class="ghost-button" type="button" hidden>半透明转不透明</button>
-                    <button id="savePreviewButton" class="ghost-button" type="button" hidden>下载预览帧</button>
+                    <button id="savePreviewButton" class="ghost-button compact-button" type="button" hidden>下载预览帧</button>
                   </div>
                 </div>
               </div>

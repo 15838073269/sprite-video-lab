@@ -1,3 +1,10 @@
+const MATTE_THRESHOLD_DEFAULTS = Object.freeze({
+  chroma: 80,
+  corridorkey: 35,
+});
+const CORRIDOR_THRESHOLD_DEFAULT_VERSION = 2;
+const PREVIOUS_CORRIDOR_THRESHOLD_DEFAULT = 20;
+
 const state = {
   upload: null,
   job: null,
@@ -36,6 +43,12 @@ const state = {
     processed: { x: 0, y: 0 },
   },
   processPreviewDrag: null,
+  instantChromaPreviewActive: false,
+  matteThresholds: { ...MATTE_THRESHOLD_DEFAULTS },
+  manualKeyColors: [],
+  keySamplingActive: false,
+  keySamplingReplacePrimary: false,
+  keySampleMarkers: [],
 };
 
 const els = {};
@@ -49,7 +62,8 @@ const AI_RESOLUTION_STEP = 32;
 const AI_RESOLUTION_DEFAULT = 1024;
 const AI_RESOLUTION_AUTO = "auto";
 const AI_MODEL_AUTO = "birefnet-hr-matting";
-const AI_DEVICE_AUTO = "auto";
+const MAX_MANUAL_KEY_COLORS = 12;
+const KEY_SAMPLE_DUPLICATE_DISTANCE = 6;
 const MAGIC_VARIANT_CONFIGS = [
   {
     key: "full",
@@ -116,6 +130,14 @@ let lastAcceptedMatteMode = "chroma";
 let aiModelInstallPromise = null;
 let realesrganInstallPromise = null;
 let preprocessSmoothingInstalling = false;
+let chromaPreviewRafId = null;
+let chromaPreviewCanvas = null;
+let corridorPreviewTimerId = null;
+let corridorPreviewInFlight = false;
+let corridorPreviewPending = false;
+let birefnetPreviewTimerId = null;
+let birefnetPreviewInFlight = false;
+let birefnetPreviewPending = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -123,6 +145,7 @@ document.addEventListener("DOMContentLoaded", () => {
   updatePreviewBackground(state.preview.background, false);
   updateProcessPreviewBackground(state.processPreviewBackground.mode, state.processPreviewBackground.color, false);
   syncManualColorLabel();
+  renderManualKeySamples();
   updateChromaVisibility();
   normalizePreviewInterval();
   updatePreviewControls(0);
@@ -134,7 +157,7 @@ document.addEventListener("DOMContentLoaded", () => {
   void loadOutputPath();
   restoreSessionFromStorage();
   void validateRestoredPreprocessSmoothing();
-  enforceAutomaticAiSettings(false);
+  normalizeAiResolutionInput(false);
   lastAcceptedMatteMode = els.matteModeInput.value || "chroma";
   startHotReloadPolling();
   window.addEventListener("beforeunload", persistSession);
@@ -158,6 +181,9 @@ function bindElements() {
     "resultPanel",
     "videoPreview",
     "mediaPreviewImage",
+    "videoWrap",
+    "keySampleMarkers",
+    "keySamplingOverlay",
     "videoProgress",
     "videoProgressFill",
     "videoProgressLabel",
@@ -180,12 +206,33 @@ function bindElements() {
     "manualColorField",
     "manualKeyInput",
     "manualKeyLabel",
+    "manualKeySampleCount",
+    "manualKeySamples",
+    "addPaletteKeyColorButton",
+    "keySamplingToggleButton",
+    "clearExtraKeySamplesButton",
     "thresholdInput",
+    "thresholdValueLabel",
     "softnessInput",
     "despillInput",
     "haloInput",
+    "birefnetEdgeShrinkInput",
     "corridorEnabledInput",
     "corridorScreenInput",
+    "corridorColorSpaceInput",
+    "corridorDespillInput",
+    "corridorDespillValueLabel",
+    "corridorRefinerInput",
+    "corridorRefinerValueLabel",
+    "corridorDespeckleEnabledInput",
+    "corridorDespeckleSizeInput",
+    "corridorGarbageEnabledInput",
+    "corridorGarbagePixelsInput",
+    "corridorKeySettings",
+    "corridorSettingsSummaryValue",
+    "corridorPreviewState",
+    "birefnetEdgeShrinkValueLabel",
+    "birefnetPreviewState",
     "aiModelInput",
     "aiDeviceInput",
     "aiResolutionInput",
@@ -199,11 +246,9 @@ function bindElements() {
     "batchSemiTransparentToBlackInput",
     "batchSemiTransparentToOpaqueInput",
     "preprocessEsrSmoothingInput",
+    "aiLivePreviewOption",
+    "aiLivePreviewInput",
     "previewFrameButton",
-    "backgroundToBlackButton",
-    "backgroundDesaturateButton",
-    "semiTransparentToBlackButton",
-    "semiTransparentToOpaqueButton",
     "savePreviewButton",
     "processPreviewTimeLabel",
     "processPreviewKeyLabel",
@@ -457,11 +502,8 @@ function bindEvents() {
   els.clearRuntimeFilesButton.addEventListener("click", clearRuntimeFiles);
   els.uploadInput.addEventListener("change", handleUploadInputChange);
   els.preprocessEsrSmoothingInput.addEventListener("change", handlePreprocessSmoothingToggle);
-  els.previewFrameButton.addEventListener("click", previewCurrentFrame);
-  els.backgroundToBlackButton.addEventListener("click", applyBackgroundToBlackPreview);
-  els.backgroundDesaturateButton.addEventListener("click", applyBackgroundDesaturatePreview);
-  els.semiTransparentToBlackButton.addEventListener("click", applySemiTransparentToBlackPreview);
-  els.semiTransparentToOpaqueButton.addEventListener("click", applySemiTransparentToOpaquePreview);
+  els.aiLivePreviewInput.addEventListener("change", handleAiLivePreviewToggle);
+  els.previewFrameButton.addEventListener("click", () => previewCurrentFrame());
   els.savePreviewButton.addEventListener("click", downloadProcessPreviewResult);
   els.processButton.addEventListener("click", processVideo);
   els.quickReferenceToggle.addEventListener("click", () => {
@@ -528,12 +570,54 @@ function bindEvents() {
   els.videoPreview.addEventListener("play", startSegmentPlaybackMonitor);
   els.videoPreview.addEventListener("pause", stopSegmentPlaybackMonitor);
   els.videoPreview.addEventListener("ended", () => restartSegmentPlayback({ autoplay: true }));
+  els.videoPreview.addEventListener("click", toggleSourceVideoPlayback);
 
   els.manualKeyInput.addEventListener("input", syncManualColorLabel);
+  els.manualKeyInput.addEventListener("change", addPaletteKeyColor);
+  els.addPaletteKeyColorButton.addEventListener("click", () => els.manualKeyInput.click());
+  els.thresholdInput.addEventListener("input", handleMatteToleranceInput);
+  els.thresholdInput.addEventListener("change", handleMatteToleranceInput);
+  els.keySamplingToggleButton.addEventListener("click", () => {
+    setKeySamplingActive(!state.keySamplingActive);
+  });
+  els.clearExtraKeySamplesButton.addEventListener("click", clearExtraManualKeyColors);
+  els.manualKeySamples.addEventListener("click", handleManualKeySampleClick);
+  els.videoWrap.addEventListener("click", handleSourceKeySampleClick);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.keySamplingActive) {
+      setKeySamplingActive(false);
+    }
+  });
   els.matteModeInput.addEventListener("change", handleMatteModeChange);
-  els.keyModeInput.addEventListener("change", updateChromaVisibility);
+  els.keyModeInput.addEventListener("change", () => {
+    updateChromaVisibility();
+    if (els.keyModeInput.value !== "manual") {
+      setKeySamplingActive(false, { announce: false });
+    }
+  });
   els.corridorEnabledInput.addEventListener("change", updateChromaVisibility);
-  els.aiResolutionInput.addEventListener("change", normalizeAiResolutionInput);
+  els.corridorDespillInput.addEventListener("input", syncCorridorControlState);
+  els.corridorRefinerInput.addEventListener("input", syncCorridorControlState);
+  els.corridorDespeckleEnabledInput.addEventListener("change", syncCorridorControlState);
+  els.corridorGarbageEnabledInput.addEventListener("change", syncCorridorControlState);
+  els.corridorKeySettings.addEventListener("toggle", persistSession);
+  [
+    els.corridorScreenInput,
+    els.corridorColorSpaceInput,
+    els.corridorDespillInput,
+    els.corridorRefinerInput,
+    els.corridorDespeckleEnabledInput,
+    els.corridorDespeckleSizeInput,
+    els.corridorGarbageEnabledInput,
+    els.corridorGarbagePixelsInput,
+  ].forEach((element) => {
+    const eventName = element.type === "range" ? "input" : "change";
+    element.addEventListener(eventName, () => {
+      syncCorridorControlState();
+      markCorridorPreviewStale();
+      scheduleCorridorLivePreview(element.type === "range" ? 220 : 80);
+    });
+  });
 
   els.frameGrid.addEventListener("change", (event) => {
     const target = event.target;
@@ -661,9 +745,16 @@ function bindEvents() {
     els.softnessInput,
     els.despillInput,
     els.haloInput,
+    els.birefnetEdgeShrinkInput,
     els.corridorEnabledInput,
     els.corridorScreenInput,
-    els.matteModeInput,
+    els.corridorColorSpaceInput,
+    els.corridorDespillInput,
+    els.corridorRefinerInput,
+    els.corridorDespeckleEnabledInput,
+    els.corridorDespeckleSizeInput,
+    els.corridorGarbageEnabledInput,
+    els.corridorGarbagePixelsInput,
     els.aiModelInput,
     els.aiDeviceInput,
     els.aiResolutionInput,
@@ -676,6 +767,7 @@ function bindEvents() {
     els.batchBackgroundDesaturateInput,
     els.batchSemiTransparentToBlackInput,
     els.batchSemiTransparentToOpaqueInput,
+    els.aiLivePreviewInput,
     els.startInput,
     els.endInput,
   ].forEach((element) => {
@@ -997,24 +1089,19 @@ function currentMatteMode() {
 }
 
 function matteModeUsesBiRefNet(mode) {
-  return (
-    mode === "birefnet" ||
-    mode === "chroma_birefnet" ||
-    mode === "birefnet_corridorkey" ||
-    mode === "birefnet_luma"
-  );
+  return mode === "birefnet";
 }
 
 function matteModeUsesCorridorKey(mode) {
-  return mode === "corridorkey" || mode === "birefnet_corridorkey";
+  return mode === "corridorkey";
 }
 
 function matteModeUsesLuma(mode) {
-  return mode === "luma" || mode === "birefnet_luma";
+  return mode === "luma";
 }
 
 function matteModeUsesChromaSeed(mode) {
-  return mode === "chroma" || mode === "corridorkey" || mode === "chroma_birefnet" || mode === "birefnet_corridorkey";
+  return mode === "chroma" || mode === "corridorkey";
 }
 
 function matteModeRequiresAiModel(mode) {
@@ -1081,18 +1168,53 @@ async function ensureAiModelsReady(mode) {
 
 async function handleMatteModeChange() {
   const selectedMode = els.matteModeInput.value || "chroma";
+  rememberMatteThreshold(lastAcceptedMatteMode);
+  applyMatteThreshold(selectedMode);
   updateChromaVisibility();
   els.matteModeInput.disabled = true;
   const ready = await ensureAiModelsReady(selectedMode);
   if (ready) {
     lastAcceptedMatteMode = selectedMode;
     persistSession();
+    if (state.upload) {
+      if (selectedMode === "corridorkey") {
+        scheduleCorridorLivePreview(0);
+      } else if (selectedMode === "birefnet") {
+        scheduleBirefnetLivePreview(0);
+      }
+    }
   } else {
     els.matteModeInput.value = lastAcceptedMatteMode;
+    applyMatteThreshold(lastAcceptedMatteMode);
     updateChromaVisibility();
     persistSession();
   }
   els.matteModeInput.disabled = false;
+}
+
+function aiLivePreviewEnabled() {
+  return Boolean(els.aiLivePreviewInput?.checked);
+}
+
+function cancelAiLivePreviewTimers() {
+  window.clearTimeout(birefnetPreviewTimerId);
+  window.clearTimeout(corridorPreviewTimerId);
+  birefnetPreviewTimerId = null;
+  corridorPreviewTimerId = null;
+  birefnetPreviewPending = false;
+  corridorPreviewPending = false;
+}
+
+function handleAiLivePreviewToggle() {
+  cancelAiLivePreviewTimers();
+  if (!aiLivePreviewEnabled() || !state.upload) {
+    return;
+  }
+  if (currentMatteMode() === "corridorkey") {
+    scheduleCorridorLivePreview(0);
+  } else if (currentMatteMode() === "birefnet") {
+    scheduleBirefnetLivePreview(0);
+  }
 }
 
 function currentUsesCorridorKey() {
@@ -1136,17 +1258,9 @@ function normalizeAiResolutionInput(shouldPersist = true) {
   }
 }
 
-function enforceAutomaticAiSettings(shouldPersist = false) {
-  els.aiModelInput.value = AI_MODEL_AUTO;
-  els.aiDeviceInput.value = AI_DEVICE_AUTO;
-  setAiResolutionValue(AI_RESOLUTION_AUTO);
-  if (shouldPersist) {
-    persistSession();
-  }
-}
-
 function applyAutomaticMatteDefaults() {
-  els.thresholdInput.value = "80";
+  state.matteThresholds = { ...MATTE_THRESHOLD_DEFAULTS };
+  applyMatteThreshold(currentMatteMode());
   els.softnessInput.value = "16";
   els.despillInput.value = "0.6";
   els.haloInput.value = "1";
@@ -1157,6 +1271,7 @@ function applyAutomaticMatteDefaults() {
 }
 
 function collectFormState() {
+  rememberMatteThreshold(currentMatteMode());
   return {
     keep_every: Number(els.keepEveryInput.value || 1),
     output_scale: 1,
@@ -1166,22 +1281,37 @@ function collectFormState() {
     matte_mode: currentMatteMode(),
     key_mode: els.keyModeInput.value,
     manual_key_hex: els.manualKeyInput.value,
+    manual_key_colors: [...state.manualKeyColors],
+    manual_key_colors_explicit: true,
     threshold: Number(els.thresholdInput.value || 0),
+    chroma_threshold: state.matteThresholds.chroma,
+    corridorkey_threshold: state.matteThresholds.corridorkey,
+    corridorkey_threshold_default_version: CORRIDOR_THRESHOLD_DEFAULT_VERSION,
     softness: Number(els.softnessInput.value === "" ? 1 : els.softnessInput.value),
     despill_strength: Number(els.despillInput.value || 0),
-    halo_pixels: Number(els.haloInput.value || 0),
+    halo_pixels: currentMatteMode() === "birefnet" ? 0 : Number(els.haloInput.value || 0),
+    birefnet_edge_shrink: 0,
     corridorkey_enabled: currentUsesCorridorKey(),
-    corridorkey_screen: els.corridorScreenInput.value,
-    ai_model: els.aiModelInput.value,
+    corridorkey_screen: "green",
+    corridorkey_color_space: "srgb",
+    corridorkey_despill_strength: Number(els.corridorDespillInput.value || 0),
+    corridorkey_refiner_scale: Number(els.corridorRefinerInput.value || 0),
+    corridorkey_despeckle_enabled: els.corridorDespeckleEnabledInput.checked,
+    corridorkey_despeckle_size: Number(els.corridorDespeckleSizeInput.value || 0),
+    corridorkey_garbage_matte_enabled: els.corridorGarbageEnabledInput.checked,
+    corridorkey_garbage_matte_px: Number(els.corridorGarbagePixelsInput.value || 20),
+    corridorkey_settings_open: els.corridorKeySettings.open,
+    ai_model: AI_MODEL_AUTO,
     ai_device: els.aiDeviceInput.value,
-    ai_resolution: normalizeAiResolution(els.aiResolutionInput.value),
-    ai_resolution_mode: normalizeAiResolution(els.aiResolutionInput.value) === AI_RESOLUTION_AUTO ? "auto" : "manual",
+    ai_resolution: AI_RESOLUTION_AUTO,
+    ai_resolution_mode: "auto",
     luma_black: Number(els.lumaBlackInput.value || 0),
     luma_white: Number(els.lumaWhiteInput.value || 85),
     luma_gamma: Number(els.lumaGammaInput.value || 0.55),
     luma_strength: Number(els.lumaStrengthInput.value || 1.7),
     luma_polarity: els.lumaPolarityInput.value || "auto",
     preprocess_esr_smoothing: els.preprocessEsrSmoothingInput.checked,
+    ai_live_preview: els.aiLivePreviewInput.checked,
     batch_background_to_black: els.batchBackgroundToBlackInput.checked,
     batch_background_desaturate: els.batchBackgroundDesaturateInput.checked,
     batch_semitransparent_to_black: els.batchSemiTransparentToBlackInput.checked,
@@ -1211,6 +1341,9 @@ function collectFormState() {
 }
 
 function collectProcessingPayload() {
+  const matteMode = currentMatteMode();
+  const usesUserChromaSettings = matteMode === "chroma";
+  const usesChromaGuideTolerance = matteMode === "chroma" || matteMode === "corridorkey";
   return {
     upload_id: state.upload?.upload_id || "",
     start_time: state.segment.start,
@@ -1223,17 +1356,28 @@ function collectProcessingPayload() {
     reduce_px: 0,
     chroma_enabled: true,
     matte_mode: currentMatteMode(),
-    key_mode: els.keyModeInput.value,
+    key_mode: usesUserChromaSettings ? els.keyModeInput.value : "auto",
     manual_key_hex: els.manualKeyInput.value,
-    threshold: Number(els.thresholdInput.value || 0),
+    manual_key_colors: usesUserChromaSettings ? [...state.manualKeyColors] : [],
+    threshold: usesChromaGuideTolerance
+      ? Number(els.thresholdInput.value || 0)
+      : MATTE_THRESHOLD_DEFAULTS.chroma,
     softness: Number(els.softnessInput.value === "" ? 1 : els.softnessInput.value),
     despill_strength: Number(els.despillInput.value || 0),
-    halo_pixels: Number(els.haloInput.value || 0),
+    halo_pixels: currentMatteMode() === "birefnet" ? 0 : Number(els.haloInput.value || 0),
+    birefnet_edge_shrink: 0,
     corridorkey_enabled: currentUsesCorridorKey(),
-    corridorkey_screen: els.corridorScreenInput.value,
-    ai_model: els.aiModelInput.value,
+    corridorkey_screen: "green",
+    corridorkey_color_space: "srgb",
+    corridorkey_despill_strength: Number(els.corridorDespillInput.value || 0),
+    corridorkey_refiner_scale: Number(els.corridorRefinerInput.value || 0),
+    corridorkey_despeckle_enabled: els.corridorDespeckleEnabledInput.checked,
+    corridorkey_despeckle_size: Number(els.corridorDespeckleSizeInput.value || 0),
+    corridorkey_garbage_matte_enabled: els.corridorGarbageEnabledInput.checked,
+    corridorkey_garbage_matte_px: Number(els.corridorGarbagePixelsInput.value || 20),
+    ai_model: AI_MODEL_AUTO,
     ai_device: els.aiDeviceInput.value,
-    ai_resolution: normalizeAiResolution(els.aiResolutionInput.value),
+    ai_resolution: AI_RESOLUTION_AUTO,
     luma_black: Number(els.lumaBlackInput.value || 0),
     luma_white: Number(els.lumaWhiteInput.value || 85),
     luma_gamma: Number(els.lumaGammaInput.value || 0.55),
@@ -1254,24 +1398,48 @@ function applyFormState(snapshot) {
 
   if (snapshot.keep_every != null) els.keepEveryInput.value = String(snapshot.keep_every);
   const legacyMatteModes = {
-    birefnet_corridorkey_key: "birefnet_corridorkey",
-    birefnet_luma_key: "birefnet_luma",
-    birefnet_luma_corridorkey: "birefnet_luma",
+    chroma_birefnet: "chroma",
+    birefnet_corridorkey: "corridorkey",
+    birefnet_corridorkey_key: "corridorkey",
+    birefnet_luma: "luma",
+    birefnet_luma_key: "luma",
+    birefnet_luma_corridorkey: "luma",
   };
   const snapshotMatteMode = legacyMatteModes[snapshot.matte_mode] || snapshot.matte_mode;
   if (snapshotMatteMode && [...els.matteModeInput.options].some((option) => option.value === snapshotMatteMode)) {
     els.matteModeInput.value = snapshotMatteMode;
   }
   if (snapshot.corridorkey_enabled && !matteModeUsesCorridorKey(els.matteModeInput.value)) {
-    if (els.matteModeInput.value === "birefnet") {
-      els.matteModeInput.value = "birefnet_corridorkey";
-    } else if (els.matteModeInput.value === "chroma") {
-      els.matteModeInput.value = "corridorkey";
-    }
+    els.matteModeInput.value = "corridorkey";
   }
   if (snapshot.key_mode) els.keyModeInput.value = snapshot.key_mode;
-  if (snapshot.manual_key_hex) els.manualKeyInput.value = snapshot.manual_key_hex;
+  const storedManualColors = Array.isArray(snapshot.manual_key_colors)
+    ? snapshot.manual_key_colors
+    : snapshot.manual_key_hex
+      ? [snapshot.manual_key_hex]
+      : [];
+  const migratedManualColors = snapshot.manual_key_colors_explicit === true
+    ? storedManualColors
+    : storedManualColors.length === 1 && normalizeHexColor(storedManualColors[0], "") === "#00FF00"
+      ? []
+      : storedManualColors;
+  setManualKeyColors(migratedManualColors, { persist: false });
   applyAutomaticMatteDefaults();
+  if (snapshot.chroma_threshold != null) {
+    state.matteThresholds.chroma = clamp(Number(snapshot.chroma_threshold), 0, 180);
+  } else if (snapshot.threshold != null && snapshotMatteMode !== "corridorkey") {
+    state.matteThresholds.chroma = clamp(Number(snapshot.threshold), 0, 180);
+  }
+  if (snapshot.corridorkey_threshold != null) {
+    const storedCorridorThreshold = clamp(Number(snapshot.corridorkey_threshold), 0, 180);
+    const storedDefaultVersion = Number(snapshot.corridorkey_threshold_default_version || 0);
+    state.matteThresholds.corridorkey =
+      storedDefaultVersion < CORRIDOR_THRESHOLD_DEFAULT_VERSION
+      && storedCorridorThreshold === PREVIOUS_CORRIDOR_THRESHOLD_DEFAULT
+        ? MATTE_THRESHOLD_DEFAULTS.corridorkey
+        : storedCorridorThreshold;
+  }
+  applyMatteThreshold(currentMatteMode());
   els.corridorEnabledInput.checked = currentUsesCorridorKey();
   if (
     snapshot.corridorkey_screen &&
@@ -1279,7 +1447,35 @@ function applyFormState(snapshot) {
   ) {
     els.corridorScreenInput.value = snapshot.corridorkey_screen;
   }
-  enforceAutomaticAiSettings(false);
+  if (["srgb", "linear"].includes(snapshot.corridorkey_color_space)) {
+    els.corridorColorSpaceInput.value = snapshot.corridorkey_color_space;
+  }
+  els.corridorScreenInput.value = "green";
+  els.corridorColorSpaceInput.value = "srgb";
+  if (snapshot.corridorkey_despill_strength != null) {
+    els.corridorDespillInput.value = String(clamp(Number(snapshot.corridorkey_despill_strength), 0, 1));
+  }
+  if (snapshot.corridorkey_refiner_scale != null) {
+    els.corridorRefinerInput.value = String(clamp(Number(snapshot.corridorkey_refiner_scale), 0, 3));
+  }
+  if (snapshot.corridorkey_despeckle_enabled != null) {
+    els.corridorDespeckleEnabledInput.checked = Boolean(snapshot.corridorkey_despeckle_enabled);
+  }
+  if (snapshot.corridorkey_despeckle_size != null) {
+    els.corridorDespeckleSizeInput.value = String(clamp(Number(snapshot.corridorkey_despeckle_size), 0, 999999));
+  }
+  if (snapshot.corridorkey_garbage_matte_enabled != null) {
+    els.corridorGarbageEnabledInput.checked = Boolean(snapshot.corridorkey_garbage_matte_enabled);
+  }
+  if (snapshot.corridorkey_garbage_matte_px != null) {
+    els.corridorGarbagePixelsInput.value = String(clamp(Number(snapshot.corridorkey_garbage_matte_px), 1, 500));
+  }
+  els.corridorKeySettings.open = Boolean(snapshot.corridorkey_settings_open);
+  syncCorridorControlState();
+  els.aiModelInput.value = AI_MODEL_AUTO;
+  setAiResolutionValue(AI_RESOLUTION_AUTO);
+  els.birefnetEdgeShrinkInput.value = "0";
+  syncBirefnetControlState();
   if (
     snapshot.luma_polarity &&
     [...els.lumaPolarityInput.options].some((option) => option.value === snapshot.luma_polarity)
@@ -1291,6 +1487,7 @@ function applyFormState(snapshot) {
   if (snapshot.preprocess_esr_smoothing != null) {
     els.preprocessEsrSmoothingInput.checked = Boolean(snapshot.preprocess_esr_smoothing);
   }
+  els.aiLivePreviewInput.checked = Boolean(snapshot.ai_live_preview);
   const batchBackgroundToBlack = snapshot.batch_background_to_black ?? snapshot.batch_green_to_black;
   if (batchBackgroundToBlack != null) {
     els.batchBackgroundToBlackInput.checked = Boolean(batchBackgroundToBlack);
@@ -1632,10 +1829,7 @@ function formatMatteModeLabel(matte) {
   if (mode === "none") label = "\u4E0D\u53BB\u80CC\u666F";
   if (mode === "luma") label = "Luma";
   if (mode === "birefnet") label = "BiRefNet";
-  if (mode === "corridorkey") label = "CorridorKey";
-  if (mode === "chroma_birefnet") label = "Chroma + BiRef \u8865\u4E3B\u4F53";
-  if (mode === "birefnet_corridorkey") label = "BiRef + Corridor \u8865\u5168";
-  if (mode === "birefnet_luma") label = "BiRef + Luma \u8865\u4EAE\u90E8";
+  if (mode === "corridorkey") label = "EZ CorridorKey";
   if (
     mode !== "none" &&
     !matteModeUsesCorridorKey(mode) &&
@@ -1676,7 +1870,13 @@ function formatMatteDetail(matte) {
   if (matte.corridorkey_enabled) {
     const screen = formatCorridorScreenLabel(matte.corridorkey_screen_color);
     const device = matte.corridorkey_device ? ` / ${matte.corridorkey_device}` : "";
-    parts.push(`CorridorKey ${screen}${device}`);
+    const despill = Number.isFinite(Number(matte.corridorkey_despill_strength))
+      ? ` / \u8FB9\u7F18\u53BB\u6EA2\u8272 ${Number(matte.corridorkey_despill_strength).toFixed(2)}`
+      : "";
+    const refiner = Number.isFinite(Number(matte.corridorkey_refiner_scale))
+      ? ` / \u7EC6\u5316 ${Number(matte.corridorkey_refiner_scale).toFixed(2)}`
+      : "";
+    parts.push(`EZ CorridorKey ${screen}${device}${despill}${refiner}`);
   }
   if (matte.alpha_aware_despill) {
     parts.push("\u81EA\u52A8 alpha-aware \u53BB\u6EA2\u8272");
@@ -1933,6 +2133,8 @@ function syncResultActions() {
 }
 
 function applyUpload(upload) {
+  setKeySamplingActive(false, { announce: false });
+  clearKeySampleMarkers();
   resetPreviewState();
   state.upload = upload;
   state.job = null;
@@ -1993,6 +2195,7 @@ function applyUpload(upload) {
 
 function resetProcessPreview() {
   state.processPreview = null;
+  state.instantChromaPreviewActive = false;
   resetProcessPreviewView("source", false);
   resetProcessPreviewView("processed", false);
   els.previewSourceImage.hidden = true;
@@ -2003,12 +2206,15 @@ function resetProcessPreview() {
   setProcessPreviewStageActive("processed", false);
   els.previewSourceEmpty.hidden = false;
   els.previewProcessedEmpty.hidden = false;
+  els.previewProcessedEmpty.textContent = "等待生成预览";
   els.processPreviewTimeLabel.textContent = "\u53D6\u6837\u65F6\u95F4 -";
   els.processPreviewKeyLabel.textContent = "\u53D6\u6837\u65B9\u5F0F - / \u62A0\u56FE -";
+  setCorridorPreviewState("empty");
+  setBirefnetPreviewState("empty");
   updateSavePreviewButton();
 }
 
-function renderProcessPreview() {
+function renderProcessPreview({ preserveView = false } = {}) {
   if (!state.processPreview) {
     resetProcessPreview();
     return;
@@ -2018,8 +2224,11 @@ function renderProcessPreview() {
     state.processPreview.ffmpeg_accel,
     state.processPreview.source_media_type || uploadMediaType()
   );
-  resetProcessPreviewPan("source");
-  resetProcessPreviewPan("processed");
+  state.instantChromaPreviewActive = false;
+  if (!preserveView) {
+    resetProcessPreviewPan("source");
+    resetProcessPreviewPan("processed");
+  }
   els.previewSourceImage.src = state.processPreview.source_url;
   els.previewProcessedImage.src = state.processPreview.processed_url;
   els.previewSourceImage.hidden = false;
@@ -2039,9 +2248,18 @@ function renderProcessPreview() {
     ? `${previewTimeLabel} / \u8F93\u51FA ${previewOutputSize}`
     : previewTimeLabel;
   const matte = state.processPreview.matte || { mode: state.processPreview.options?.matte_mode || "chroma" };
+  setCorridorPreviewState(matte.mode === "corridorkey" ? "current" : "empty");
+  setBirefnetPreviewState(matte.mode === "birefnet" ? "current" : "empty");
   const matteLabel = formatMatteModeLabel(matte);
   const matteDetail = formatMatteDetail(matte);
-  const chromaDetail = matte.mode === "chroma" ? ` / \u80CC\u666F\u8272 ${state.processPreview.key_color || "-"}` : "";
+  const previewKeyColors = Array.isArray(state.processPreview.key_colors) && state.processPreview.key_colors.length > 0
+    ? state.processPreview.key_colors
+    : [state.processPreview.key_color || "-"];
+  const chromaDetail = matteModeUsesChromaSeed(matte.mode)
+    ? previewKeyColors.length > 1
+      ? ` / \u80CC\u666F\u8272\u6837 ${previewKeyColors.length} \u4E2A`
+      : ` / \u80CC\u666F\u8272 ${previewKeyColors[0]}`
+    : "";
   els.processPreviewKeyLabel.textContent = `${sourceModeLabel} / ${matteLabel}${matteDetail ? ` / ${matteDetail}` : ""}${chromaDetail}`;
   updateSavePreviewButton();
   persistSession();
@@ -2109,6 +2327,18 @@ function playVideoPreviewMuted() {
     playPromise.catch(() => {});
   }
   startSegmentPlaybackMonitor();
+}
+
+function toggleSourceVideoPlayback(event) {
+  if (!isVideoUpload() || state.keySamplingActive) {
+    return;
+  }
+  event.preventDefault();
+  if (els.videoPreview.paused) {
+    playVideoPreviewMuted();
+  } else {
+    els.videoPreview.pause();
+  }
 }
 
 function restartSegmentPlayback({ autoplay = true } = {}) {
@@ -2301,6 +2531,10 @@ async function processVideo() {
     return;
   }
 
+  if (!validateManualChromaSamples()) {
+    return;
+  }
+
   const matteMode = currentMatteMode();
   if (!(await ensureAiModelsReady(matteMode))) {
     return;
@@ -2341,9 +2575,13 @@ async function processVideo() {
   });
 }
 
-async function previewCurrentFrame() {
+async function previewCurrentFrame({ preserveView = false } = {}) {
   if (!state.upload) {
     setStatus("\u5148\u5BFC\u5165\u89C6\u9891\u3001\u56FE\u7247\u6216\u591A\u56FE\u5E8F\u5217\uFF0C\u518D\u9884\u89C8\u53C2\u6570\u6548\u679C\u3002", "error");
+    return;
+  }
+
+  if (!validateManualChromaSamples()) {
     return;
   }
 
@@ -2384,7 +2622,7 @@ async function previewCurrentFrame() {
       body: payload,
     });
     state.processPreview = data.preview;
-    renderProcessPreview();
+    renderProcessPreview({ preserveView });
     setStatus(
       isImageUpload()
         ? `\u5355\u5F20\u56FE\u7247\u9884\u89C8\u5DF2\u66F4\u65B0\uFF0C${formatSourceModeLabel(data.preview.ffmpeg_accel, data.preview.source_media_type)}\u3002`
@@ -2410,98 +2648,6 @@ async function downloadProcessPreviewResult() {
     const filename = buildPreviewDownloadFilename();
     triggerFileDownload(state.processPreview.processed_url, filename);
     setStatus(`\u5DF2\u5F00\u59CB\u4E0B\u8F7D\u9884\u89C8\u56FE\uFF1A${filename}`, "success");
-  });
-}
-
-async function applyBackgroundToBlackPreview() {
-  if (!state.processPreview?.preview_id) {
-    setStatus("\u5148\u9884\u89C8\u5F53\u524D\u5E27\uFF0C\u518D\u5904\u7406\u80CC\u666F\u6B8B\u7559\u3002", "error");
-    return;
-  }
-
-  await withBusy(els.backgroundToBlackButton, async () => {
-    setStatus("\u6B63\u5728\u628A\u9884\u89C8\u56FE\u91CC\u7684\u80CC\u666F\u6B8B\u7559\u8F6C\u9ED1...");
-    const data = await apiJson("/api/preview-background-to-black", {
-      method: "POST",
-      body: {
-        preview_id: state.processPreview.preview_id,
-        threshold: 42,
-        dominance: 24,
-      },
-    });
-    state.processPreview = data.preview;
-    renderProcessPreview();
-    const changed = Number(data.preview?.postprocess?.background_to_black?.changed_pixels || 0);
-    setStatus(`\u80CC\u666F\u6B8B\u7559\u8F6C\u9ED1\u5B8C\u6210\uFF0C\u5904\u7406\u4E86 ${changed.toLocaleString()} \u4E2A\u50CF\u7D20\u3002`, "success");
-  });
-}
-
-async function applyBackgroundDesaturatePreview() {
-  if (!state.processPreview?.preview_id) {
-    setStatus("\u5148\u9884\u89C8\u5F53\u524D\u5E27\uFF0C\u518D\u5904\u7406\u80CC\u666F\u6B8B\u7559\u3002", "error");
-    return;
-  }
-
-  await withBusy(els.backgroundDesaturateButton, async () => {
-    setStatus("\u6B63\u5728\u628A\u9884\u89C8\u56FE\u91CC\u7684\u80CC\u666F\u6B8B\u7559\u9971\u548C\u5EA6\u5F52\u96F6...");
-    const data = await apiJson("/api/preview-background-desaturate", {
-      method: "POST",
-      body: {
-        preview_id: state.processPreview.preview_id,
-        threshold: 42,
-        dominance: 24,
-      },
-    });
-    state.processPreview = data.preview;
-    renderProcessPreview();
-    const changed = Number(data.preview?.postprocess?.background_desaturate?.changed_pixels || 0);
-    setStatus(`\u80CC\u666F\u6B8B\u7559\u9971\u548C\u5EA6\u5F52\u96F6\u5B8C\u6210\uFF0C\u5904\u7406\u4E86 ${changed.toLocaleString()} \u4E2A\u50CF\u7D20\u3002`, "success");
-  });
-}
-
-async function applySemiTransparentToBlackPreview() {
-  if (!state.processPreview?.preview_id) {
-    setStatus("\u5148\u9884\u89C8\u5F53\u524D\u5E27\uFF0C\u518D\u5904\u7406\u534A\u900F\u660E\u50CF\u7D20\u3002", "error");
-    return;
-  }
-
-  await withBusy(els.semiTransparentToBlackButton, async () => {
-    setStatus("\u6B63\u5728\u628A\u9884\u89C8\u56FE\u91CC\u7684\u534A\u900F\u660E\u50CF\u7D20\u6D82\u9ED1...");
-    const data = await apiJson("/api/preview-semitransparent-to-black", {
-      method: "POST",
-      body: {
-        preview_id: state.processPreview.preview_id,
-        alpha_min: 1,
-        alpha_max: 254,
-      },
-    });
-    state.processPreview = data.preview;
-    renderProcessPreview();
-    const changed = Number(data.preview?.postprocess?.semitransparent_to_black?.changed_pixels || 0);
-    setStatus(`\u534A\u900F\u6D82\u9ED1\u5B8C\u6210\uFF0C\u5904\u7406\u4E86 ${changed.toLocaleString()} \u4E2A\u50CF\u7D20\u3002`, "success");
-  });
-}
-
-async function applySemiTransparentToOpaquePreview() {
-  if (!state.processPreview?.preview_id) {
-    setStatus("\u5148\u9884\u89C8\u5F53\u524D\u5E27\uFF0C\u518D\u628A\u534A\u900F\u660E\u50CF\u7D20\u53D8\u6210\u4E0D\u900F\u660E\u3002", "error");
-    return;
-  }
-
-  await withBusy(els.semiTransparentToOpaqueButton, async () => {
-    setStatus("\u6B63\u5728\u4FDD\u7559\u534A\u900F\u50CF\u7D20\u989C\u8272\uFF0C\u5E76\u628A alpha \u63D0\u5230\u4E0D\u900F\u660E...");
-    const data = await apiJson("/api/preview-semitransparent-to-opaque", {
-      method: "POST",
-      body: {
-        preview_id: state.processPreview.preview_id,
-        alpha_min: 1,
-        alpha_max: 254,
-      },
-    });
-    state.processPreview = data.preview;
-    renderProcessPreview();
-    const changed = Number(data.preview?.postprocess?.semitransparent_to_opaque?.changed_pixels || 0);
-    setStatus(`\u534A\u900F\u53D8\u4E0D\u900F\u660E\u5B8C\u6210\uFF0C\u5904\u7406\u4E86 ${changed.toLocaleString()} \u4E2A\u50CF\u7D20\u3002`, "success");
   });
 }
 
@@ -2552,21 +2698,18 @@ function triggerFileDownload(url, filename) {
 }
 
 function updateSavePreviewButton() {
-  if (!els.savePreviewButton || !els.backgroundToBlackButton || !els.backgroundDesaturateButton || !els.semiTransparentToBlackButton || !els.semiTransparentToOpaqueButton) {
+  if (!els.savePreviewButton) {
     return;
   }
 
   const isSameUpload = !state.processPreview?.upload_id || state.processPreview.upload_id === state.upload?.upload_id;
-  const canDownload = Boolean(state.upload && isSameUpload && state.processPreview?.preview_id && state.processPreview?.processed_url);
-  const canPostprocess = Boolean(state.upload && isSameUpload && state.processPreview?.preview_id);
-  els.backgroundToBlackButton.hidden = !state.upload;
-  els.backgroundToBlackButton.disabled = !canPostprocess;
-  els.backgroundDesaturateButton.hidden = !state.upload;
-  els.backgroundDesaturateButton.disabled = !canPostprocess;
-  els.semiTransparentToBlackButton.hidden = !state.upload;
-  els.semiTransparentToBlackButton.disabled = !canPostprocess;
-  els.semiTransparentToOpaqueButton.hidden = !state.upload;
-  els.semiTransparentToOpaqueButton.disabled = !canPostprocess;
+  const canDownload = Boolean(
+    state.upload
+    && isSameUpload
+    && !state.instantChromaPreviewActive
+    && state.processPreview?.preview_id
+    && state.processPreview?.processed_url
+  );
   els.savePreviewButton.hidden = !state.upload;
   els.savePreviewButton.disabled = !canDownload;
 }
@@ -3673,23 +3816,33 @@ function formatFfmpegAccelLabel(ffmpegAccel) {
 function updateChromaVisibility() {
   const matteMode = currentMatteMode();
   const chromaEnabled = matteMode !== "none";
-  const isChroma = chromaEnabled && matteModeUsesChromaSeed(matteMode);
+  const isChroma = matteMode === "chroma";
   const isAi = chromaEnabled && matteModeUsesBiRefNet(matteMode);
   const isLuma = chromaEnabled && matteModeUsesLuma(matteMode);
   const isCorridor = chromaEnabled && matteModeUsesCorridorKey(matteMode);
+  const usesAiLivePreview = isAi || isCorridor;
   const usesSpillControls = chromaEnabled;
-  const usesKeyColorControls = chromaEnabled && matteModeUsesChromaSeed(matteMode);
+  const usesKeyColorControls = isChroma;
   const isManual = els.keyModeInput.value === "manual";
+  syncChromaToleranceLabel();
   els.corridorEnabledInput.checked = isCorridor;
+  els.aiLivePreviewOption.hidden = !usesAiLivePreview;
   els.matteModeInput.disabled = false;
   els.keyModeInput.closest(".field").style.display = usesKeyColorControls ? "" : "none";
   els.manualColorField.style.display = usesKeyColorControls && isManual ? "" : "none";
   document.querySelectorAll(".matte-target-group").forEach((node) => {
-    node.style.display = usesKeyColorControls || isLuma ? "" : "none";
+    node.style.display = usesKeyColorControls || isLuma || isCorridor ? "" : "none";
   });
   document.querySelectorAll(".chroma-only").forEach((node) => {
     node.style.display = isChroma ? "" : "none";
   });
+  document.querySelectorAll(".chroma-guide-only").forEach((node) => {
+    node.style.display = isChroma || isCorridor ? "" : "none";
+  });
+  els.thresholdInput.setAttribute(
+    "aria-label",
+    isCorridor ? "CorridorKey 粗遮罩容差" : "Chroma 背景色容差"
+  );
   document.querySelectorAll(".spill-matte-only").forEach((node) => {
     node.style.display = usesSpillControls ? "" : "none";
   });
@@ -3703,12 +3856,681 @@ function updateChromaVisibility() {
     node.style.display = "none";
   });
   document.querySelectorAll(".corridor-key-only").forEach((node) => {
-    node.style.display = isCorridor ? "" : "none";
+    node.style.display = isCorridor ? "block" : "none";
   });
+  syncCorridorControlState();
+  syncBirefnetControlState();
+  if (isCorridor && els.corridorPreviewState.dataset.state !== "stale") {
+    const previewMode = state.processPreview?.matte?.mode || state.processPreview?.options?.matte_mode;
+    setCorridorPreviewState(previewMode === "corridorkey" ? "current" : "empty");
+  }
+  if (isAi && els.birefnetPreviewState.dataset.state !== "stale") {
+    const previewMode = state.processPreview?.matte?.mode || state.processPreview?.options?.matte_mode;
+    setBirefnetPreviewState(previewMode === "birefnet" ? "current" : "empty");
+  }
+  if ((!usesKeyColorControls || !isManual) && state.keySamplingActive) {
+    setKeySamplingActive(false, { announce: false });
+  }
+}
+
+function syncCorridorControlState() {
+  const despill = clamp(Number(els.corridorDespillInput.value || 0), 0, 1);
+  const refiner = clamp(Number(els.corridorRefinerInput.value || 0), 0, 3);
+  els.corridorDespillInput.value = String(despill);
+  els.corridorRefinerInput.value = String(refiner);
+  els.corridorDespillValueLabel.textContent = despill.toFixed(2);
+  els.corridorRefinerValueLabel.textContent = refiner.toFixed(2);
+  els.corridorDespeckleSizeInput.disabled = !els.corridorDespeckleEnabledInput.checked;
+  els.corridorGarbagePixelsInput.disabled = !els.corridorGarbageEnabledInput.checked;
+  const despeckleSummary = els.corridorDespeckleEnabledInput.checked
+    ? `散点 ${Number(els.corridorDespeckleSizeInput.value || 0)}`
+    : "散点关";
+  const garbageSummary = els.corridorGarbageEnabledInput.checked
+    ? `遮罩 ${Number(els.corridorGarbagePixelsInput.value || 0)} px`
+    : "遮罩关";
+  els.corridorSettingsSummaryValue.textContent =
+    `去溢色 ${despill.toFixed(2)} · 细化 ${refiner.toFixed(2)} · ${despeckleSummary} · ${garbageSummary}`;
+}
+
+function syncBirefnetControlState() {
+  const edgeShrink = clamp(Number(els.birefnetEdgeShrinkInput.value || 0), 0, 8);
+  els.birefnetEdgeShrinkInput.value = String(edgeShrink);
+  els.birefnetEdgeShrinkValueLabel.textContent = `${edgeShrink} px`;
+}
+
+function setBirefnetPreviewState(nextState) {
+  if (!els.birefnetPreviewState) {
+    return;
+  }
+  const labels = {
+    empty: "\u5c1a\u672a\u9884\u89c8",
+    stale: "\u53c2\u6570\u5df2\u4fee\u6539",
+    loading: "\u6b63\u5728\u81ea\u52a8\u9884\u89c8",
+    current: "\u5f53\u524d\u53c2\u6570\u5df2\u9884\u89c8",
+  };
+  const normalized = labels[nextState] ? nextState : "empty";
+  els.birefnetPreviewState.dataset.state = normalized;
+  els.birefnetPreviewState.textContent = labels[normalized];
+}
+
+function markBirefnetPreviewStale() {
+  if (currentMatteMode() !== "birefnet") {
+    return;
+  }
+  const previewMode = state.processPreview?.matte?.mode || state.processPreview?.options?.matte_mode;
+  setBirefnetPreviewState(previewMode === "birefnet" ? "stale" : "empty");
+}
+
+function scheduleBirefnetLivePreview(delay = 220) {
+  if (!aiLivePreviewEnabled() || currentMatteMode() !== "birefnet" || !state.upload || preprocessSmoothingInstalling) {
+    return;
+  }
+  window.clearTimeout(birefnetPreviewTimerId);
+  birefnetPreviewTimerId = window.setTimeout(runBirefnetLivePreview, Math.max(0, delay));
+}
+
+async function runBirefnetLivePreview() {
+  birefnetPreviewTimerId = null;
+  if (!aiLivePreviewEnabled() || currentMatteMode() !== "birefnet" || !state.upload) {
+    birefnetPreviewPending = false;
+    return;
+  }
+  if (birefnetPreviewInFlight || els.previewFrameButton.disabled) {
+    birefnetPreviewPending = true;
+    scheduleBirefnetLivePreview(160);
+    return;
+  }
+
+  birefnetPreviewInFlight = true;
+  birefnetPreviewPending = false;
+  setBirefnetPreviewState("loading");
+  try {
+    await previewCurrentFrame({ preserveView: true });
+  } finally {
+    birefnetPreviewInFlight = false;
+    if (birefnetPreviewPending) {
+      scheduleBirefnetLivePreview(0);
+    } else if (els.birefnetPreviewState.dataset.state === "loading") {
+      markBirefnetPreviewStale();
+    }
+  }
+}
+
+function setCorridorPreviewState(nextState) {
+  if (!els.corridorPreviewState) {
+    return;
+  }
+  const labels = {
+    empty: "尚未预览",
+    stale: "参数已修改",
+    loading: "正在自动预览",
+    current: "当前参数已预览",
+  };
+  const normalized = labels[nextState] ? nextState : "empty";
+  els.corridorPreviewState.dataset.state = normalized;
+  els.corridorPreviewState.textContent = labels[normalized];
+}
+
+function markCorridorPreviewStale() {
+  if (currentMatteMode() !== "corridorkey") {
+    return;
+  }
+  const previewMode = state.processPreview?.matte?.mode || state.processPreview?.options?.matte_mode;
+  setCorridorPreviewState(previewMode === "corridorkey" ? "stale" : "empty");
+}
+
+function scheduleCorridorLivePreview(delay = 220) {
+  if (!aiLivePreviewEnabled() || currentMatteMode() !== "corridorkey" || !state.upload || preprocessSmoothingInstalling) {
+    return;
+  }
+  window.clearTimeout(corridorPreviewTimerId);
+  corridorPreviewTimerId = window.setTimeout(runCorridorLivePreview, Math.max(0, delay));
+}
+
+async function runCorridorLivePreview() {
+  corridorPreviewTimerId = null;
+  if (!aiLivePreviewEnabled() || currentMatteMode() !== "corridorkey" || !state.upload) {
+    corridorPreviewPending = false;
+    return;
+  }
+  if (corridorPreviewInFlight || els.previewFrameButton.disabled) {
+    corridorPreviewPending = true;
+    scheduleCorridorLivePreview(160);
+    return;
+  }
+
+  corridorPreviewInFlight = true;
+  corridorPreviewPending = false;
+  setCorridorPreviewState("loading");
+  try {
+    await previewCurrentFrame({ preserveView: true });
+  } finally {
+    corridorPreviewInFlight = false;
+    if (corridorPreviewPending) {
+      scheduleCorridorLivePreview(0);
+    } else if (els.corridorPreviewState.dataset.state === "loading") {
+      markCorridorPreviewStale();
+    }
+  }
+}
+
+function syncChromaToleranceLabel() {
+  const value = clamp(Number(els.thresholdInput.value || 0), 0, 180);
+  els.thresholdInput.value = String(value);
+  els.thresholdValueLabel.textContent = String(value);
+}
+
+function rememberMatteThreshold(mode) {
+  if (!(mode in MATTE_THRESHOLD_DEFAULTS)) {
+    return;
+  }
+  state.matteThresholds[mode] = clamp(Number(els.thresholdInput.value || 0), 0, 180);
+}
+
+function applyMatteThreshold(mode) {
+  if (!(mode in MATTE_THRESHOLD_DEFAULTS)) {
+    return;
+  }
+  const value = state.matteThresholds[mode] ?? MATTE_THRESHOLD_DEFAULTS[mode];
+  els.thresholdInput.value = String(clamp(Number(value), 0, 180));
+  syncChromaToleranceLabel();
+}
+
+function handleMatteToleranceInput() {
+  syncChromaToleranceLabel();
+  const matteMode = currentMatteMode();
+  rememberMatteThreshold(matteMode);
+  if (matteMode === "corridorkey") {
+    markCorridorPreviewStale();
+    scheduleCorridorLivePreview(220);
+    return;
+  }
+  requestChromaPreview();
+}
+
+function requestChromaPreview() {
+  syncChromaToleranceLabel();
+  if (
+    currentMatteMode() !== "chroma"
+    || !state.upload
+    || preprocessSmoothingInstalling
+    || (els.keyModeInput.value === "manual" && state.manualKeyColors.length === 0)
+  ) {
+    return;
+  }
+  window.cancelAnimationFrame(chromaPreviewRafId);
+  chromaPreviewRafId = window.requestAnimationFrame(renderInstantChromaPreview);
+}
+
+function instantChromaSourceElement() {
+  if (!els.previewSourceImage.hidden && els.previewSourceImage.complete && els.previewSourceImage.naturalWidth) {
+    return els.previewSourceImage;
+  }
+  if (!els.videoPreview.hidden && els.videoPreview.readyState >= 2 && els.videoPreview.videoWidth) {
+    return els.videoPreview;
+  }
+  if (!els.mediaPreviewImage.hidden && els.mediaPreviewImage.complete && els.mediaPreviewImage.naturalWidth) {
+    return els.mediaPreviewImage;
+  }
+  return null;
+}
+
+function hexColorToRgb(color) {
+  const normalized = normalizeHexColor(color, "");
+  if (!normalized) {
+    return null;
+  }
+  return [
+    Number.parseInt(normalized.slice(1, 3), 16),
+    Number.parseInt(normalized.slice(3, 5), 16),
+    Number.parseInt(normalized.slice(5, 7), 16),
+  ];
+}
+
+function detectInstantChromaKeyColor(pixels, width, height) {
+  const buckets = new Map();
+  const step = Math.max(1, Math.floor(Math.min(width, height) / 80));
+  const addPixel = (x, y) => {
+    const index = ((y * width) + x) * 4;
+    if (pixels[index + 3] === 0) {
+      return;
+    }
+    const red = pixels[index];
+    const green = pixels[index + 1];
+    const blue = pixels[index + 2];
+    const bucketKey = `${Math.round(red / 24)},${Math.round(green / 24)},${Math.round(blue / 24)}`;
+    const bucket = buckets.get(bucketKey) || { count: 0, red: 0, green: 0, blue: 0 };
+    bucket.count += 1;
+    bucket.red += red;
+    bucket.green += green;
+    bucket.blue += blue;
+    buckets.set(bucketKey, bucket);
+  };
+  for (let x = 0; x < width; x += step) {
+    addPixel(x, 0);
+    addPixel(x, height - 1);
+  }
+  for (let y = step; y < height - step; y += step) {
+    addPixel(0, y);
+    addPixel(width - 1, y);
+  }
+
+  const best = [...buckets.values()].sort((first, second) => second.count - first.count)[0];
+  return best
+    ? [Math.round(best.red / best.count), Math.round(best.green / best.count), Math.round(best.blue / best.count)]
+    : [0, 255, 0];
+}
+
+function instantChromaKeyColors(pixels, width, height) {
+  if (els.keyModeInput.value === "manual") {
+    return state.manualKeyColors.map(hexColorToRgb).filter(Boolean);
+  }
+  const previewMode = state.processPreview?.matte?.mode || state.processPreview?.options?.matte_mode;
+  const previewColors = previewMode === "chroma"
+    ? state.processPreview?.key_colors || [state.processPreview?.key_color]
+    : [];
+  const cachedColors = previewColors.map(hexColorToRgb).filter(Boolean);
+  return cachedColors.length > 0 ? cachedColors : [detectInstantChromaKeyColor(pixels, width, height)];
+}
+
+function erodeInstantChromaAlpha(pixels, width, height, radius) {
+  if (radius <= 0) {
+    return;
+  }
+  const alpha = new Uint8ClampedArray(width * height);
+  for (let pixelIndex = 0; pixelIndex < alpha.length; pixelIndex += 1) {
+    alpha[pixelIndex] = pixels[(pixelIndex * 4) + 3];
+  }
+  for (let y = 0; y < height; y += 1) {
+    const minY = Math.max(0, y - radius);
+    const maxY = Math.min(height - 1, y + radius);
+    for (let x = 0; x < width; x += 1) {
+      const minX = Math.max(0, x - radius);
+      const maxX = Math.min(width - 1, x + radius);
+      let minimum = 255;
+      for (let sampleY = minY; sampleY <= maxY && minimum > 0; sampleY += 1) {
+        for (let sampleX = minX; sampleX <= maxX; sampleX += 1) {
+          minimum = Math.min(minimum, alpha[(sampleY * width) + sampleX]);
+          if (minimum === 0) break;
+        }
+      }
+      pixels[(((y * width) + x) * 4) + 3] = minimum;
+    }
+  }
+}
+
+function renderInstantChromaPreview() {
+  chromaPreviewRafId = null;
+  const source = instantChromaSourceElement();
+  if (!source) {
+    return;
+  }
+
+  const sourceWidth = source instanceof HTMLVideoElement ? source.videoWidth : source.naturalWidth;
+  const sourceHeight = source instanceof HTMLVideoElement ? source.videoHeight : source.naturalHeight;
+  if (!sourceWidth || !sourceHeight) {
+    return;
+  }
+
+  const processedStage = els.previewProcessedImage.closest(".image-preview-stage");
+  const longEdge = clamp(Math.round(Math.max(processedStage.clientWidth * 2, 640)), 640, 960);
+  const scale = Math.min(1, longEdge / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const height = Math.max(1, Math.round(sourceHeight * scale));
+  chromaPreviewCanvas ||= document.createElement("canvas");
+  chromaPreviewCanvas.width = width;
+  chromaPreviewCanvas.height = height;
+  const context = chromaPreviewCanvas.getContext("2d", { willReadFrequently: true });
+  context.clearRect(0, 0, width, height);
+  context.drawImage(source, 0, 0, width, height);
+
+  const shouldPopulateSource = els.previewSourceImage.hidden || !els.previewSourceImage.getAttribute("src");
+  const sourceDataUrl = shouldPopulateSource ? chromaPreviewCanvas.toDataURL("image/png") : "";
+  const imageData = context.getImageData(0, 0, width, height);
+  const pixels = imageData.data;
+  const keyColors = instantChromaKeyColors(pixels, width, height);
+  if (keyColors.length === 0) {
+    return;
+  }
+
+  const threshold = Number(els.thresholdInput.value || 0);
+  const softness = Math.max(0, Number(els.softnessInput.value || 0));
+  const maxDistance = softness > 0 ? threshold + softness : Math.max(threshold, 1);
+  const despillStrength = Math.max(0, Number(els.despillInput.value || 0));
+  for (let index = 0; index < pixels.length; index += 4) {
+    const red = pixels[index];
+    const green = pixels[index + 1];
+    const blue = pixels[index + 2];
+    let nearestSquared = Number.POSITIVE_INFINITY;
+    for (const [keyRed, keyGreen, keyBlue] of keyColors) {
+      const distanceSquared = ((red - keyRed) ** 2) + ((green - keyGreen) ** 2) + ((blue - keyBlue) ** 2);
+      if (distanceSquared < nearestSquared) nearestSquared = distanceSquared;
+    }
+    const distance = Math.sqrt(nearestSquared);
+    const alpha = distance <= threshold
+      ? 0
+      : softness <= 0 || distance >= maxDistance
+        ? 255
+        : Math.floor(((distance - threshold) / softness) * 255);
+    const spill = Math.max(0, green - Math.max(red, blue));
+    const closeness = Math.max(0, 1 - Math.min(distance / maxDistance, 1));
+    const reduction = Math.floor(spill * despillStrength * Math.max(closeness, 1 - (alpha / 255)));
+    pixels[index + 1] = Math.max(0, green - reduction);
+    pixels[index + 3] = alpha;
+  }
+  erodeInstantChromaAlpha(pixels, width, height, Math.max(0, Math.round(Number(els.haloInput.value || 0))));
+  context.putImageData(imageData, 0, 0);
+
+  if (shouldPopulateSource) {
+    els.previewSourceImage.src = sourceDataUrl;
+    els.previewSourceImage.hidden = false;
+    els.previewSourceEmpty.hidden = true;
+    setProcessPreviewStageActive("source", true);
+  }
+  els.previewProcessedImage.src = chromaPreviewCanvas.toDataURL("image/png");
+  els.previewProcessedImage.hidden = false;
+  els.previewProcessedEmpty.hidden = true;
+  setProcessPreviewStageActive("processed", true);
+  state.instantChromaPreviewActive = true;
+  const sampleLabel = keyColors.length > 1 ? `背景色样 ${keyColors.length} 个` : "背景色样 1 个";
+  els.processPreviewKeyLabel.textContent = `浏览器即时预览 / Chroma / ${sampleLabel}`;
+  updateSavePreviewButton();
+}
+
+function clearInstantChromaPreviewForEmptySamples() {
+  if (currentMatteMode() !== "chroma" || els.keyModeInput.value !== "manual") {
+    return;
+  }
+  window.cancelAnimationFrame(chromaPreviewRafId);
+  chromaPreviewRafId = null;
+  els.previewProcessedImage.hidden = true;
+  els.previewProcessedEmpty.textContent = "添加背景色样后即时预览";
+  els.previewProcessedEmpty.hidden = false;
+  state.instantChromaPreviewActive = true;
+  els.processPreviewKeyLabel.textContent = "浏览器即时预览 / Chroma / 尚未添加背景色样";
+  updateSavePreviewButton();
+}
+
+function validateManualChromaSamples() {
+  if (
+    currentMatteMode() === "chroma"
+    && els.keyModeInput.value === "manual"
+    && state.manualKeyColors.length === 0
+  ) {
+    setStatus("手动指定背景色时，请先从画面或色板添加至少一个色样。", "error");
+    return false;
+  }
+  return true;
+}
+
+function normalizeManualKeyColorList(colors) {
+  const normalized = [];
+  (Array.isArray(colors) ? colors : []).forEach((color) => {
+    const value = normalizeHexColor(color, "");
+    if (value && !normalized.includes(value) && normalized.length < MAX_MANUAL_KEY_COLORS) {
+      normalized.push(value);
+    }
+  });
+  return normalized;
+}
+
+function setManualKeyColors(colors, { persist = true } = {}) {
+  state.manualKeyColors = normalizeManualKeyColorList(colors);
+  syncManualColorLabel();
+  renderManualKeySamples();
+  if (persist) {
+    persistSession();
+  }
+}
+
+function addPaletteKeyColor() {
+  const color = normalizeHexColor(els.manualKeyInput.value, "#00FF00");
+  if (addManualKeyColor(color)) {
+    setStatus(`已添加色板颜色 ${color}。`, "success");
+    requestChromaPreview();
+  }
+}
+
+function colorDistance(first, second) {
+  const values = [first, second].map((color) => [
+    Number.parseInt(color.slice(1, 3), 16),
+    Number.parseInt(color.slice(3, 5), 16),
+    Number.parseInt(color.slice(5, 7), 16),
+  ]);
+  return Math.sqrt(
+    ((values[0][0] - values[1][0]) ** 2)
+    + ((values[0][1] - values[1][1]) ** 2)
+    + ((values[0][2] - values[1][2]) ** 2)
+  );
+}
+
+function addManualKeyColor(color) {
+  const normalized = normalizeHexColor(color, "");
+  if (!normalized) {
+    return false;
+  }
+  if (state.keySamplingReplacePrimary) {
+    state.keySamplingReplacePrimary = false;
+    setManualKeyColors([normalized]);
+    return true;
+  }
+  if (state.manualKeyColors.some((sample) => colorDistance(sample, normalized) < KEY_SAMPLE_DUPLICATE_DISTANCE)) {
+    setStatus(`这个颜色与已有色样太接近：${normalized}`);
+    return false;
+  }
+  if (state.manualKeyColors.length >= MAX_MANUAL_KEY_COLORS) {
+    setStatus(`最多保留 ${MAX_MANUAL_KEY_COLORS} 个背景色样。`, "error");
+    return false;
+  }
+  setManualKeyColors([...state.manualKeyColors, normalized]);
+  return true;
+}
+
+function renderManualKeySamples() {
+  if (!els.manualKeySamples) {
+    return;
+  }
+  els.manualKeySamples.innerHTML = state.manualKeyColors.length > 0
+    ? state.manualKeyColors.map((color, index) => `
+    <button
+      class="key-sample-chip"
+      type="button"
+      data-key-sample-index="${index}"
+      style="--sample-color: ${color}"
+      title="删除色样 ${color}"
+      aria-label="删除背景色样 ${color}"
+    >${color}</button>
+  `).join("")
+    : '<span class="manual-key-empty">尚未添加背景色样</span>';
+  els.manualKeySampleCount.textContent = `${state.manualKeyColors.length} / ${MAX_MANUAL_KEY_COLORS}`;
+  els.clearExtraKeySamplesButton.disabled = state.manualKeyColors.length === 0;
+}
+
+function handleManualKeySampleClick(event) {
+  const button = event.target.closest("[data-key-sample-index]");
+  if (!button) {
+    return;
+  }
+  const index = Number(button.dataset.keySampleIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= state.manualKeyColors.length) {
+    return;
+  }
+  const [removedColor] = state.manualKeyColors.splice(index, 1);
+  state.keySampleMarkers = state.keySampleMarkers.filter((marker) => marker.color !== removedColor);
+  setManualKeyColors(state.manualKeyColors);
+  renderKeySampleMarkers();
+  setStatus(
+    state.manualKeyColors.length > 0
+      ? `已删除背景色样 ${removedColor}。`
+      : `已删除最后一个背景色样；添加颜色后再预览或处理。`,
+    "success"
+  );
+  if (state.manualKeyColors.length > 0) {
+    requestChromaPreview();
+  } else {
+    clearInstantChromaPreviewForEmptySamples();
+  }
+}
+
+function clearExtraManualKeyColors() {
+  state.keySampleMarkers = [];
+  setManualKeyColors([]);
+  renderKeySampleMarkers();
+  clearInstantChromaPreviewForEmptySamples();
+  setStatus("已清空全部背景色样。", "success");
+}
+
+function clearKeySampleMarkers() {
+  state.keySampleMarkers = [];
+  renderKeySampleMarkers();
+}
+
+function renderKeySampleMarkers() {
+  if (!els.keySampleMarkers) {
+    return;
+  }
+  els.keySampleMarkers.innerHTML = state.keySampleMarkers.map((marker) => `
+    <span
+      class="key-sample-marker"
+      style="left: ${marker.x}%; top: ${marker.y}%; --sample-color: ${marker.color}"
+    ></span>
+  `).join("");
+}
+
+function setKeySamplingActive(active, { announce = true } = {}) {
+  const shouldActivate = Boolean(active);
+  if (shouldActivate) {
+    if (!state.upload) {
+      if (announce) setStatus("先导入素材，再从画面添加背景色。", "error");
+      return;
+    }
+    if (currentMatteMode() !== "chroma") {
+      if (announce) setStatus("当前处理方式不使用背景色样。", "error");
+      return;
+    }
+    state.keySamplingReplacePrimary = els.keyModeInput.value !== "manual";
+    els.keyModeInput.value = "manual";
+    updateChromaVisibility();
+    if (isVideoUpload()) {
+      els.videoPreview.pause();
+    }
+  } else {
+    state.keySamplingReplacePrimary = false;
+    clearKeySampleMarkers();
+  }
+
+  state.keySamplingActive = shouldActivate;
+  els.videoWrap.classList.toggle("is-key-sampling", shouldActivate);
+  els.keySamplingOverlay.hidden = !shouldActivate;
+  els.keySamplingToggleButton.textContent = shouldActivate ? "结束取色" : "从画面添加";
+  els.keySamplingToggleButton.classList.toggle("active", shouldActivate);
+  if (announce) {
+    setStatus(
+      shouldActivate
+        ? "取色已开启：可连续点击源画面的不同背景区域，按 Esc 结束。"
+        : `取色结束，已保留 ${state.manualKeyColors.length} 个背景色样。`,
+      shouldActivate ? undefined : "success"
+    );
+  }
+  persistSession();
+}
+
+function sourceElementForKeySampling() {
+  if (!els.videoPreview.hidden && els.videoPreview.readyState >= 2) {
+    return els.videoPreview;
+  }
+  if (!els.mediaPreviewImage.hidden && els.mediaPreviewImage.complete) {
+    return els.mediaPreviewImage;
+  }
+  return null;
+}
+
+function sampleSourceColor(source, event) {
+  const rect = source.getBoundingClientRect();
+  const sourceWidth = source instanceof HTMLVideoElement ? source.videoWidth : source.naturalWidth;
+  const sourceHeight = source instanceof HTMLVideoElement ? source.videoHeight : source.naturalHeight;
+  if (!sourceWidth || !sourceHeight || !rect.width || !rect.height) {
+    return null;
+  }
+
+  const scale = Math.min(rect.width / sourceWidth, rect.height / sourceHeight);
+  const renderedWidth = sourceWidth * scale;
+  const renderedHeight = sourceHeight * scale;
+  const renderedLeft = rect.left + ((rect.width - renderedWidth) / 2);
+  const renderedTop = rect.top + ((rect.height - renderedHeight) / 2);
+  const localX = event.clientX - renderedLeft;
+  const localY = event.clientY - renderedTop;
+  if (localX < 0 || localY < 0 || localX > renderedWidth || localY > renderedHeight) {
+    return null;
+  }
+
+  const centerX = clamp(Math.round(localX / scale), 0, sourceWidth - 1);
+  const centerY = clamp(Math.round(localY / scale), 0, sourceHeight - 1);
+  const sampleWidth = Math.min(5, sourceWidth);
+  const sampleHeight = Math.min(5, sourceHeight);
+  const sampleX = clamp(centerX - Math.floor(sampleWidth / 2), 0, sourceWidth - sampleWidth);
+  const sampleY = clamp(centerY - Math.floor(sampleHeight / 2), 0, sourceHeight - sampleHeight);
+  const canvas = document.createElement("canvas");
+  canvas.width = sampleWidth;
+  canvas.height = sampleHeight;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(source, sampleX, sampleY, sampleWidth, sampleHeight, 0, 0, sampleWidth, sampleHeight);
+  const pixels = context.getImageData(0, 0, sampleWidth, sampleHeight).data;
+  const channels = [[], [], []];
+  for (let index = 0; index < pixels.length; index += 4) {
+    if (pixels[index + 3] === 0) {
+      continue;
+    }
+    channels[0].push(pixels[index]);
+    channels[1].push(pixels[index + 1]);
+    channels[2].push(pixels[index + 2]);
+  }
+  if (channels[0].length === 0) {
+    return null;
+  }
+  const median = (values) => values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
+  const color = `#${channels.map((values) => median(values).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+  const wrapRect = els.videoWrap.getBoundingClientRect();
+  return {
+    color,
+    marker: {
+      color,
+      x: ((event.clientX - wrapRect.left) / wrapRect.width) * 100,
+      y: ((event.clientY - wrapRect.top) / wrapRect.height) * 100,
+    },
+  };
+}
+
+function handleSourceKeySampleClick(event) {
+  if (!state.keySamplingActive) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const source = sourceElementForKeySampling();
+  if (!source) {
+    setStatus("源画面尚未加载完成，请稍后再取色。", "error");
+    return;
+  }
+  try {
+    const sample = sampleSourceColor(source, event);
+    if (!sample) {
+      setStatus("请点击画面内容，不要点击两侧留空区域。", "error");
+      return;
+    }
+    if (addManualKeyColor(sample.color)) {
+      state.keySampleMarkers.push(sample.marker);
+      renderKeySampleMarkers();
+      setStatus(`已添加色样 ${sample.color}，当前共 ${state.manualKeyColors.length} 个。`, "success");
+      requestChromaPreview();
+    }
+  } catch (error) {
+    setStatus(`取色失败：${error.message}`, "error");
+  }
 }
 
 function syncManualColorLabel() {
-  els.manualKeyLabel.textContent = (els.manualKeyInput.value || "#00ff00").toUpperCase();
+  els.manualKeyLabel.textContent = normalizeHexColor(els.manualKeyInput.value, "#00FF00");
 }
 
 async function openPath(path) {

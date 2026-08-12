@@ -64,7 +64,7 @@ Recommended external cache layout:
 
 ```powershell
 $env:SPRITE_VIDEO_LAB_AI_MODEL_CACHE = "E:\sprite-video-lab-models\huggingface"
-$env:SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT = "E:\sprite-video-lab-models\CorridorKey"
+$env:SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT = "E:\sprite-video-lab-models\EZ-CorridorKey"
 ```
 
 If `setup_ai_runtime.bat` creates or expects a separate Python runtime, start the app with that runtime instead of `.venv`:

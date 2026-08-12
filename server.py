@@ -105,34 +105,25 @@ FFMPEG_ACCEL_ALIASES = {
 }
 AI_MATTE_MODEL_REPOS = {
     "birefnet-hr-matting": "ZhengPeng7/BiRefNet_HR-matting",
-    "birefnet-lite-2k": "ZhengPeng7/BiRefNet_lite-2K",
-    "birefnet-general": "ZhengPeng7/BiRefNet",
 }
 AI_MATTE_MODEL_LABELS = {
     "birefnet-hr-matting": "BiRefNet HR-matting",
-    "birefnet-lite-2k": "BiRefNet lite-2K",
-    "birefnet-general": "BiRefNet general",
 }
+BIREFNET_REQUIRED_FILES = (
+    "BiRefNet_config.py",
+    "birefnet.py",
+    "config.json",
+    "model.safetensors",
+)
 AI_MATTE_MODES = {
     "none",
     "chroma",
     "luma",
     "birefnet",
     "corridorkey",
-    "chroma_birefnet",
-    "birefnet_corridorkey",
-    "birefnet_luma",
 }
-BIREFNET_MATTE_MODES = {
-    "birefnet",
-    "chroma_birefnet",
-    "birefnet_corridorkey",
-    "birefnet_luma",
-}
-CORRIDORKEY_MATTE_MODES = {
-    "corridorkey",
-    "birefnet_corridorkey",
-}
+BIREFNET_MATTE_MODES = {"birefnet"}
+CORRIDORKEY_MATTE_MODES = {"corridorkey"}
 AI_MATTE_DEVICE_ALIASES = {
     "": "auto",
     "auto": "auto",
@@ -142,6 +133,7 @@ AI_MATTE_DEVICE_ALIASES = {
     "cpu": "cpu",
 }
 DEFAULT_AI_MATTE_MODEL = "birefnet-hr-matting"
+BIREFNET_HR_MATTING_REVISION = "5d6b6f8adcb5b417c871b1d84ceaae9871355b7f"
 DEFAULT_AI_MATTE_RESOLUTION = 1024
 AI_MATTE_RESOLUTION_AUTO = "auto"
 AI_MATTE_MIN_RESOLUTION = 256
@@ -149,10 +141,26 @@ AI_MATTE_MAX_RESOLUTION = 2560
 AI_MATTE_RESOLUTION_MULTIPLE = 32
 OUTPUT_SCALE_MIN = 0.05
 OUTPUT_SCALE_MAX = 2.0
-CORRIDORKEY_REPO_URL = "https://github.com/nikopueringer/CorridorKey"
+CORRIDORKEY_REPO_URL = "https://github.com/edenaion/EZ-CorridorKey"
 CORRIDORKEY_IMG_SIZE = 2048
 CORRIDORKEY_GPU_DESPECKLE_PIXEL_LIMIT = 2**24
-CORRIDORKEY_SCREEN_COLORS = {"auto", "green", "blue"}
+CORRIDORKEY_COLOR_SPACES = {"srgb", "linear"}
+CORRIDORKEY_DEFAULTS = {
+    "color_space": "srgb",
+    "despill_strength": 0.5,
+    "refiner_scale": 1.0,
+    "despeckle_enabled": True,
+    "despeckle_size": 400,
+    "garbage_matte_enabled": False,
+    "garbage_matte_px": 20,
+}
+CORRIDORKEY_TORCH_CHECKPOINTS = {
+    "green": (
+        "nikopueringer/CorridorKey_v1.0",
+        "CorridorKey_v1.0.pth",
+        "f6386ddf042d8e92aeb5fd16cb9b101cff508195",
+    ),
+}
 CANVAS_MODES = {"auto", "square_bottom", "square_center"}
 LINE_CLEANER_METHODS = {"classic", "realesrgan_anime"}
 REAL_ESRGAN_ANIME_MODEL = "realesrgan-x4plus-anime"
@@ -397,8 +405,8 @@ def default_corridorkey_root() -> Path:
         return Path(configured).expanduser()
     e_drive = Path("E:/")
     if e_drive.exists():
-        return e_drive / "sprite-video-lab-models" / "CorridorKey"
-    return WORK_DIR / "models" / "CorridorKey"
+        return e_drive / "sprite-video-lab-models" / "EZ-CorridorKey"
+    return WORK_DIR / "models" / "EZ-CorridorKey"
 
 
 def configure_ai_model_cache() -> Path:
@@ -427,21 +435,31 @@ def ai_components_for_matte_mode(matte_mode: str) -> list[str]:
     return components
 
 
-def huggingface_repo_is_cached(repo_id: str) -> bool:
+def huggingface_repo_is_cached(
+    repo_id: str,
+    required_files: tuple[str, ...] = (),
+    revision: str = "",
+) -> bool:
     repo_dir = default_ai_model_cache_dir() / f"models--{repo_id.replace('/', '--')}"
     snapshots_dir = repo_dir / "snapshots"
-    return snapshots_dir.is_dir() and any(path.is_file() for path in snapshots_dir.rglob("*"))
+    if not snapshots_dir.is_dir():
+        return False
+    candidates = [snapshots_dir / revision] if revision else list(snapshots_dir.iterdir())
+    for snapshot_dir in candidates:
+        if not snapshot_dir.is_dir():
+            continue
+        if required_files and all((snapshot_dir / filename).is_file() for filename in required_files):
+            return True
+        if not required_files and any(path.is_file() for path in snapshot_dir.rglob("*")):
+            return True
+    return False
 
 
 def corridorkey_checkpoint_is_cached(screen_color: str) -> bool:
     checkpoint_dir = default_corridorkey_root() / "CorridorKeyModule" / "checkpoints"
-    color = "blue" if screen_color == "blue" else "green"
-    names = (
-        ("CorridorKeyBlue_1.0.safetensors", "CorridorKeyBlue_1.0.pth")
-        if color == "blue"
-        else ("CorridorKey_v1.0.safetensors", "CorridorKey_v1.0.pth")
-    )
-    return any((checkpoint_dir / name).is_file() and (checkpoint_dir / name).stat().st_size > 0 for name in names)
+    filename = CORRIDORKEY_TORCH_CHECKPOINTS["green"][1]
+    path = checkpoint_dir / filename
+    return path.is_file() and path.stat().st_size > 0
 
 
 def missing_ai_dependency_names() -> list[str]:
@@ -456,14 +474,15 @@ def ai_model_install_status(matte_mode: str, model_key: str = DEFAULT_AI_MATTE_M
     models = {}
     if "birefnet" in components:
         requested_repo = AI_MATTE_MODEL_REPOS[normalized_model_key]
-        fallback_repo = AI_MATTE_MODEL_REPOS["birefnet-general"]
-        models[normalized_model_key] = huggingface_repo_is_cached(requested_repo)
-        models["birefnet-general"] = huggingface_repo_is_cached(fallback_repo)
+        models[normalized_model_key] = huggingface_repo_is_cached(
+            requested_repo,
+            BIREFNET_REQUIRED_FILES,
+            BIREFNET_HR_MATTING_REVISION,
+        )
     if "corridorkey" in components:
         source_ready = (default_corridorkey_root() / "CorridorKeyModule").is_dir()
         models["corridorkey-source"] = source_ready
         models["corridorkey-green"] = corridorkey_checkpoint_is_cached("green")
-        models["corridorkey-blue"] = corridorkey_checkpoint_is_cached("blue")
     return {
         "required": bool(components),
         "installed": bool(components) and not dependencies_missing and all(models.values()),
@@ -481,17 +500,28 @@ def download_birefnet_model(model_key: str) -> str:
     cache_dir = configure_ai_model_cache()
     from huggingface_hub import snapshot_download
 
-    snapshot_download(repo_id=repo_id, cache_dir=str(cache_dir))
+    snapshot_download(
+        repo_id=repo_id,
+        revision=BIREFNET_HR_MATTING_REVISION,
+        cache_dir=str(cache_dir),
+        allow_patterns=list(BIREFNET_REQUIRED_FILES),
+    )
     return normalized_model_key
 
 
 def download_corridorkey_checkpoint(screen_color: str) -> str:
-    _np, _torch_module, corridor_backend, _root = import_corridorkey_dependencies()
-    ensure_checkpoint = getattr(corridor_backend, "_ensure_torch_checkpoint", None)
-    if not callable(ensure_checkpoint):
-        raise RuntimeError("CorridorKey does not expose its checkpoint downloader")
-    color = "blue" if screen_color == "blue" else "green"
-    ensure_checkpoint(color)
+    color = "green"
+    repo_id, filename, revision = CORRIDORKEY_TORCH_CHECKPOINTS[color]
+    checkpoint_dir = default_corridorkey_root() / "CorridorKeyModule" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        revision=revision,
+        local_dir=str(checkpoint_dir),
+    )
     return color
 
 
@@ -521,16 +551,11 @@ def install_ai_models_for_matte_mode(
         installed = []
         if "birefnet" in components:
             normalized_model_key = normalize_ai_model_key(model_key)
-            keys = [normalized_model_key]
-            if normalized_model_key != "birefnet-general":
-                keys.append("birefnet-general")
-            for key in keys:
-                download_birefnet_model(key)
-                installed.append(key)
+            download_birefnet_model(normalized_model_key)
+            installed.append(normalized_model_key)
         if "corridorkey" in components:
-            for screen_color in ("green", "blue"):
-                download_corridorkey_checkpoint(screen_color)
-                installed.append(f"corridorkey-{screen_color}")
+            download_corridorkey_checkpoint("green")
+            installed.append("corridorkey-green")
 
         status = ai_model_install_status(matte_mode, model_key)
         if not status["installed"]:
@@ -580,6 +605,27 @@ def parse_hex_color(raw: str) -> tuple[int, int, int]:
 
 def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
     return f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+
+
+def normalize_manual_key_colors(
+    manual_key_hex: str,
+    manual_key_colors: list[str] | None,
+    limit: int = 12,
+) -> list[tuple[int, int, int]]:
+    raw_colors = manual_key_colors if isinstance(manual_key_colors, list) else [manual_key_hex]
+
+    colors: list[tuple[int, int, int]] = []
+    for raw_color in raw_colors:
+        try:
+            color = parse_hex_color(str(raw_color))
+        except ValueError:
+            continue
+        if color not in colors:
+            colors.append(color)
+        if len(colors) >= limit:
+            break
+
+    return colors
 
 
 def safe_int(value, default: int) -> int:
@@ -676,18 +722,7 @@ def target_size_from_source_height(source_height: int, output_scale: float) -> i
 
 def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
     raw_value = str(raw or "").strip().lower()
-    compact_value = re.sub(r"\s+", "", raw_value)
-    dash_aliases = {
-        "birefnet-luma": "birefnet_luma",
-        "birefnet-luma-key": "birefnet_luma",
-        "birefnet-corridor": "birefnet_corridorkey",
-        "birefnet-corridorkey": "birefnet_corridorkey",
-        "birefnet-corridor-key": "birefnet_corridorkey",
-        "birefnet-corridorkey-key": "birefnet_corridorkey",
-    }
-    if raw_value in dash_aliases or compact_value in dash_aliases:
-        return dash_aliases.get(raw_value, dash_aliases[compact_value])
-    value = raw_value.replace("-", "_")
+    value = re.sub(r"\s+", "", raw_value).replace("-", "_")
     aliases = {
         "": "chroma" if chroma_enabled else "none",
         "off": "none",
@@ -708,35 +743,36 @@ def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
         "luma": "luma",
         "luma_key": "luma",
         "luminance": "luma",
-        "chroma_birefnet": "chroma_birefnet",
-        "chroma+birefnet": "chroma_birefnet",
-        "chroma_biref": "chroma_birefnet",
-        "chroma+biref": "chroma_birefnet",
-        "birefnet_chroma": "chroma_birefnet",
-        "birefnet+chroma": "chroma_birefnet",
-        "birefnet_corridor": "birefnet_corridorkey",
-        "birefnet_corridor_key": "birefnet_corridorkey",
-        "birefnet_corridorkey": "birefnet_corridorkey",
-        "birefnet+corridor": "birefnet_corridorkey",
-        "birefnet+corridorkey": "birefnet_corridorkey",
-        "birefnet_corridorkey_key": "birefnet_corridorkey",
-        "birefnet_corridor_keyer": "birefnet_corridorkey",
-        "birefnet_corridorkey_keyer": "birefnet_corridorkey",
-        "birefnet_luma": "birefnet_luma",
-        "birefnet+luma": "birefnet_luma",
-        "birefnet_luma_key": "birefnet_luma",
-        "birefnet_luma_keyer": "birefnet_luma",
-        "birefnet_luma_corridorkey": "birefnet_luma",
-        "birefnet_luma_corridor": "birefnet_luma",
-        "birefnet_luma_corridor_key": "birefnet_luma",
-        "birefnet_corridorkey_luma": "birefnet_luma",
-        "birefnet_corridor_luma": "birefnet_luma",
-        "birefnet+luma+corridor": "birefnet_luma",
-        "birefnet+luma+corridorkey": "birefnet_luma",
-        "birefnet+corridor+luma": "birefnet_luma",
-        "birefnet+corridorkey+luma": "birefnet_luma",
-        "ai_luma": "birefnet_luma",
-        "ai_glow": "birefnet_luma",
+        # Removed composite modes migrate to the closest standalone algorithm.
+        "chroma_birefnet": "chroma",
+        "chroma+birefnet": "chroma",
+        "chroma_biref": "chroma",
+        "chroma+biref": "chroma",
+        "birefnet_chroma": "chroma",
+        "birefnet+chroma": "chroma",
+        "birefnet_corridor": "corridorkey",
+        "birefnet_corridor_key": "corridorkey",
+        "birefnet_corridorkey": "corridorkey",
+        "birefnet+corridor": "corridorkey",
+        "birefnet+corridorkey": "corridorkey",
+        "birefnet_corridorkey_key": "corridorkey",
+        "birefnet_corridor_keyer": "corridorkey",
+        "birefnet_corridorkey_keyer": "corridorkey",
+        "birefnet_luma": "luma",
+        "birefnet+luma": "luma",
+        "birefnet_luma_key": "luma",
+        "birefnet_luma_keyer": "luma",
+        "birefnet_luma_corridorkey": "luma",
+        "birefnet_luma_corridor": "luma",
+        "birefnet_luma_corridor_key": "luma",
+        "birefnet_corridorkey_luma": "luma",
+        "birefnet_corridor_luma": "luma",
+        "birefnet+luma+corridor": "luma",
+        "birefnet+luma+corridorkey": "luma",
+        "birefnet+corridor+luma": "luma",
+        "birefnet+corridorkey+luma": "luma",
+        "ai_luma": "luma",
+        "ai_glow": "luma",
     }
     mode = aliases.get(value, value)
     return mode if mode in AI_MATTE_MODES else ("chroma" if chroma_enabled else "none")
@@ -748,11 +784,11 @@ def normalize_ai_model_key(raw: str) -> str:
         "hr": "birefnet-hr-matting",
         "hr-matting": "birefnet-hr-matting",
         "matting": "birefnet-hr-matting",
-        "lite": "birefnet-lite-2k",
-        "lite-2k": "birefnet-lite-2k",
-        "2k": "birefnet-lite-2k",
-        "general": "birefnet-general",
-        "default": "birefnet-general",
+        "lite": "birefnet-hr-matting",
+        "lite-2k": "birefnet-hr-matting",
+        "2k": "birefnet-hr-matting",
+        "general": "birefnet-hr-matting",
+        "default": "birefnet-hr-matting",
     }
     value = aliases.get(value, value)
     return value if value in AI_MATTE_MODEL_REPOS else DEFAULT_AI_MATTE_MODEL
@@ -764,8 +800,55 @@ def normalize_ai_device(raw: str) -> str:
 
 
 def normalize_corridorkey_screen(raw: str) -> str:
-    value = str(raw or "auto").strip().lower()
-    return value if value in CORRIDORKEY_SCREEN_COLORS else "auto"
+    return "green"
+
+
+def normalize_corridorkey_options(raw: dict | None = None) -> dict:
+    values = raw if isinstance(raw, dict) else {}
+    color_space = str(values.get("color_space") or CORRIDORKEY_DEFAULTS["color_space"]).strip().lower()
+    if color_space not in CORRIDORKEY_COLOR_SPACES:
+        color_space = CORRIDORKEY_DEFAULTS["color_space"]
+    try:
+        despill_strength = float(values.get("despill_strength", CORRIDORKEY_DEFAULTS["despill_strength"]))
+    except (TypeError, ValueError):
+        despill_strength = CORRIDORKEY_DEFAULTS["despill_strength"]
+    try:
+        refiner_scale = float(values.get("refiner_scale", CORRIDORKEY_DEFAULTS["refiner_scale"]))
+    except (TypeError, ValueError):
+        refiner_scale = CORRIDORKEY_DEFAULTS["refiner_scale"]
+    try:
+        despeckle_size = int(values.get("despeckle_size", CORRIDORKEY_DEFAULTS["despeckle_size"]))
+    except (TypeError, ValueError):
+        despeckle_size = CORRIDORKEY_DEFAULTS["despeckle_size"]
+    try:
+        garbage_matte_px = int(values.get("garbage_matte_px", CORRIDORKEY_DEFAULTS["garbage_matte_px"]))
+    except (TypeError, ValueError):
+        garbage_matte_px = CORRIDORKEY_DEFAULTS["garbage_matte_px"]
+    return {
+        "color_space": color_space,
+        "despill_strength": max(0.0, min(1.0, despill_strength)),
+        "refiner_scale": max(0.0, min(3.0, refiner_scale)),
+        "despeckle_enabled": bool(values.get("despeckle_enabled", CORRIDORKEY_DEFAULTS["despeckle_enabled"])),
+        "despeckle_size": max(0, min(999999, despeckle_size)),
+        "garbage_matte_enabled": bool(
+            values.get("garbage_matte_enabled", CORRIDORKEY_DEFAULTS["garbage_matte_enabled"])
+        ),
+        "garbage_matte_px": max(1, min(500, garbage_matte_px)),
+    }
+
+
+def corridorkey_options_from_payload(payload: dict) -> dict:
+    return normalize_corridorkey_options(
+        {
+            "color_space": payload.get("corridorkey_color_space"),
+            "despill_strength": payload.get("corridorkey_despill_strength"),
+            "refiner_scale": payload.get("corridorkey_refiner_scale"),
+            "despeckle_enabled": payload.get("corridorkey_despeckle_enabled", True),
+            "despeckle_size": payload.get("corridorkey_despeckle_size"),
+            "garbage_matte_enabled": payload.get("corridorkey_garbage_matte_enabled", False),
+            "garbage_matte_px": payload.get("corridorkey_garbage_matte_px"),
+        }
+    )
 
 
 def normalize_canvas_mode(raw: str) -> str:
@@ -785,10 +868,7 @@ def normalize_canvas_mode(raw: str) -> str:
 
 
 def resolve_corridorkey_screen(raw: str, key_rgb: tuple[int, int, int]) -> str:
-    normalized = normalize_corridorkey_screen(raw)
-    if normalized != "auto":
-        return normalized
-    return "blue" if key_rgb[2] > key_rgb[1] and key_rgb[2] >= key_rgb[0] else "green"
+    return "green"
 
 
 def resolve_ffmpeg_binary(name: str) -> str:
@@ -1627,20 +1707,24 @@ def chroma_key_frame(
     softness: int,
     despill_strength: float,
     halo_pixels: int,
+    key_rgbs: list[tuple[int, int, int]] | None = None,
 ) -> Image.Image:
     rgba = image.convert("RGBA")
     output_pixels: list[tuple[int, int, int, int]] = []
-    k_r, k_g, k_b = key_rgb
+    active_key_rgbs = key_rgbs or [key_rgb]
     if softness <= 0:
         max_distance = max(threshold, 1)
     else:
         max_distance = threshold + softness
 
     for r_value, g_value, b_value, _ in rgba.getdata():
-        dist = math.sqrt(
-            (r_value - k_r) ** 2
-            + (g_value - k_g) ** 2
-            + (b_value - k_b) ** 2
+        dist = min(
+            math.sqrt(
+                (r_value - key_r) ** 2
+                + (g_value - key_g) ** 2
+                + (b_value - key_b) ** 2
+            )
+            for key_r, key_g, key_b in active_key_rgbs
         )
         if dist <= threshold:
             alpha = 0
@@ -1718,6 +1802,7 @@ def load_birefnet_model(model_key: str, requested_device: str):
     cache_dir = configure_ai_model_cache()
     model = auto_model.from_pretrained(
         repo_id,
+        revision=BIREFNET_HR_MATTING_REVISION,
         trust_remote_code=True,
         cache_dir=str(cache_dir),
         local_files_only=True,
@@ -1763,6 +1848,12 @@ def import_corridorkey_dependencies():
         corridor_inference = importlib.import_module("CorridorKeyModule.inference_engine")
     except ModuleNotFoundError as exc:
         raise RuntimeError(f"CorridorKey inference engine could not be imported from {root}.") from exc
+
+    inference_defaults = getattr(corridor_inference, "INFERENCE_DEFAULTS", {})
+    if "garbage_matte_px" not in inference_defaults:
+        raise RuntimeError(
+            f"{root} 不是 EZ-CorridorKey。请运行 setup_ai_runtime.bat 安装 {CORRIDORKEY_REPO_URL}。"
+        )
 
     patch_corridorkey_gpu_despeckle(corridor_inference, torch)
 
@@ -1848,6 +1939,32 @@ def corridorkey_processed_to_image(processed) -> Image.Image:
     return Image.fromarray(rgba_u8, "RGBA")
 
 
+def preserve_corridorkey_opaque_source_rgb(
+    source: Image.Image,
+    refined: Image.Image,
+    opaque_threshold: int = 250,
+) -> Image.Image:
+    """Keep source color in solid subject interiors and CorridorKey color at edges."""
+    source_rgb = source.convert("RGB")
+    refined_rgba = refined.convert("RGBA")
+    if source_rgb.size != refined_rgba.size:
+        source_rgb = source_rgb.resize(refined_rgba.size, LANCZOS)
+
+    alpha = refined_rgba.getchannel("A")
+    interior = alpha.point(lambda value: 255 if value >= opaque_threshold else 0)
+    long_edge = max(refined_rgba.size)
+    scale = long_edge / 1920.0
+    erode_px = max(1, int(round(4 * scale)))
+    feather_px = max(1, int(round(2 * scale)))
+    interior = interior.filter(ImageFilter.MinFilter(erode_px * 2 + 1))
+    interior = interior.filter(ImageFilter.GaussianBlur(radius=feather_px))
+
+    preserved_rgb = Image.composite(source_rgb, refined_rgba.convert("RGB"), interior)
+    preserved = preserved_rgb.convert("RGBA")
+    preserved.putalpha(alpha)
+    return preserved
+
+
 def corridorkey_auto_despeckle_on_gpu(image: Image.Image) -> bool:
     return True
 
@@ -1860,22 +1977,20 @@ def corridorkey_process_arrays(
     engine,
     rgb,
     mask,
-    screen_channel: int,
-    despill_strength: float,
-    post_process_on_gpu: bool,
-    auto_despeckle: bool,
+    screen_color: str,
+    options: dict,
 ):
     result = engine.process_frame(
         rgb,
         mask,
-        input_is_linear=False,
+        refiner_scale=options["refiner_scale"],
+        input_is_linear=options["color_space"] == "linear",
         fg_is_straight=True,
-        despill_strength=max(0.0, min(1.0, float(despill_strength or 0.0))),
-        auto_despeckle=auto_despeckle,
-        despeckle_size=400,
-        generate_comp=False,
-        post_process_on_gpu=post_process_on_gpu,
-        screen_channel=screen_channel,
+        despill_strength=options["despill_strength"],
+        auto_despeckle=options["despeckle_enabled"],
+        despeckle_size=options["despeckle_size"],
+        screen_color=screen_color,
+        garbage_matte_px=options["garbage_matte_px"] if options["garbage_matte_enabled"] else 0,
     )
     return result
 
@@ -1895,39 +2010,39 @@ def corridorkey_refine_frame(
     alpha_mask: Image.Image,
     requested_device: str,
     screen_color: str,
-    despill_strength: float,
+    raw_options: dict | None = None,
 ) -> tuple[Image.Image, dict]:
     import numpy as np
 
+    options = normalize_corridorkey_options(raw_options)
     engine, device, root = load_corridorkey_engine(requested_device, screen_color)
-    screen_channel = 2 if screen_color == "blue" else 1
-    post_process_on_gpu = corridorkey_postprocess_on_gpu(device)
-    auto_despeckle = not post_process_on_gpu or corridorkey_auto_despeckle_on_gpu(image)
-    uses_safe_despeckle = post_process_on_gpu and (image.size[0] * image.size[1]) > CORRIDORKEY_GPU_DESPECKLE_PIXEL_LIMIT
     rgb = np.array(image.convert("RGB"), dtype=np.uint8, copy=True)
     mask = np.array(alpha_mask.convert("L"), dtype=np.uint8, copy=True)
     result = corridorkey_process_arrays(
         engine,
         rgb,
         mask,
-        screen_channel,
-        despill_strength,
-        post_process_on_gpu,
-        auto_despeckle,
+        screen_color,
+        options,
     )
-    alpha = corridorkey_alpha_to_image(result["processed"][..., 3:4])
-    refined = apply_alpha_mask(image, alpha)
+    refined = corridorkey_processed_to_image(result["processed"])
+    refined = preserve_corridorkey_opaque_source_rgb(image, refined)
 
     info = {
         "corridorkey_enabled": True,
-        "corridorkey_color_source": "source-exact",
-        "corridorkey_rgb_processing": "alpha-only",
+        "corridorkey_implementation": "EZ-CorridorKey",
+        "corridorkey_color_source": "source-interior+ez-edge-foreground",
+        "corridorkey_rgb_processing": "source-interior-preserved+edge-reconstruction+edge-despill",
         "corridorkey_screen_color": screen_color,
         "corridorkey_device": device,
         "corridorkey_resolution": CORRIDORKEY_IMG_SIZE,
-        "corridorkey_post_process": "gpu" if post_process_on_gpu else "cpu",
-        "corridorkey_auto_despeckle": auto_despeckle,
-        "corridorkey_safe_despeckle": uses_safe_despeckle,
+        "corridorkey_color_space": options["color_space"],
+        "corridorkey_despill_strength": options["despill_strength"],
+        "corridorkey_refiner_scale": options["refiner_scale"],
+        "corridorkey_auto_despeckle": options["despeckle_enabled"],
+        "corridorkey_despeckle_size": options["despeckle_size"],
+        "corridorkey_garbage_matte_enabled": options["garbage_matte_enabled"],
+        "corridorkey_garbage_matte_px": options["garbage_matte_px"] if options["garbage_matte_enabled"] else 0,
         "corridorkey_tiled": False,
         "corridorkey_root": str(root),
     }
@@ -1960,13 +2075,6 @@ def birefnet_mask_score(mask: Image.Image) -> dict:
     }
 
 
-def is_weak_birefnet_mask(score: dict) -> bool:
-    max_alpha = int(score.get("max_alpha") or 0)
-    strong_ratio = float(score.get("strong_ratio") or 0.0)
-    visible_ratio = float(score.get("visible_ratio") or 0.0)
-    return max_alpha < 80 or (max_alpha < 128 and strong_ratio < 0.002 and visible_ratio < 0.08)
-
-
 def is_low_confidence_birefnet_mask(score: dict) -> bool:
     max_alpha = int(score.get("max_alpha") or 0)
     mean_alpha = float(score.get("mean_alpha") or 0.0)
@@ -1981,28 +2089,6 @@ def is_low_confidence_birefnet_mask(score: dict) -> bool:
     if strong_ratio >= 0.03:
         return False
     return mean_alpha < 36
-
-
-def should_use_birefnet_fallback(current_score: dict, fallback_score: dict) -> bool:
-    current_max = int(current_score.get("max_alpha") or 0)
-    fallback_max = int(fallback_score.get("max_alpha") or 0)
-    current_strong = float(current_score.get("strong_ratio") or 0.0)
-    fallback_strong = float(fallback_score.get("strong_ratio") or 0.0)
-    current_visible = float(current_score.get("visible_ratio") or 0.0)
-    fallback_visible = float(fallback_score.get("visible_ratio") or 0.0)
-    current_mean = float(current_score.get("mean_alpha") or 0.0)
-    fallback_mean = float(fallback_score.get("mean_alpha") or 0.0)
-    if fallback_max < 128:
-        return False
-    if fallback_max >= max(160, current_max * 2) and fallback_strong > current_strong:
-        return True
-    if current_visible >= max(current_strong * 2.0, current_strong + 0.08):
-        return (
-            fallback_strong >= max(current_strong * 1.05, current_strong + 0.005)
-            and fallback_visible <= current_visible * 0.75
-            and fallback_mean >= current_mean * 1.05
-        )
-    return current_max < 80 and fallback_strong >= 0.005
 
 
 def should_use_solid_background_fallback(
@@ -2117,19 +2203,6 @@ def birefnet_alpha_mask(
         solid_mask, solid_info = solid_fallback
         info.update(solid_info)
         return solid_mask, info
-
-    fallback_model_key = "birefnet-general"
-    if normalized_model_key != fallback_model_key and (is_weak_birefnet_mask(score) or is_low_confidence_birefnet_mask(score)):
-        fallback_mask, fallback_info = run_birefnet_inference(image, fallback_model_key, requested_device, resolution)
-        fallback_score = birefnet_mask_score(fallback_mask)
-        if should_use_birefnet_fallback(score, fallback_score):
-            fallback_info["mask_score"] = fallback_score
-            fallback_info["requested_model_key"] = normalized_model_key
-            fallback_info["fallback_model_key"] = fallback_model_key
-            fallback_info["fallback_reason"] = "selected BiRefNet model produced a weak or diffuse alpha mask"
-            fallback_info["solid_key_fallback"] = False
-            fallback_info["solid_key_color"] = ""
-            return fallback_mask, fallback_info
 
     return mask, info
 
@@ -2409,18 +2482,25 @@ def apply_matte_pipeline(
     luma_polarity: str,
     corridorkey_enabled: bool,
     corridorkey_screen: str,
+    manual_key_colors: list[str] | None = None,
+    corridorkey_options: dict | None = None,
 ) -> tuple[list[Image.Image], tuple[int, int, int], dict]:
     if not raw_images:
         raise ValueError("no frames to matte")
 
     mode = normalize_matte_mode(matte_mode, chroma_enabled)
     key_rgb = auto_key_color(raw_images[0])
+    key_rgbs = [key_rgb]
     if key_mode == "manual":
-        key_rgb = parse_hex_color(manual_key_hex)
+        key_rgbs = normalize_manual_key_colors(manual_key_hex, manual_key_colors)
+        if not key_rgbs:
+            raise ValueError("manual background color requires at least one sample")
+        key_rgb = key_rgbs[0]
     normalized_luma_black = max(0, min(254, int(luma_black)))
     normalized_luma_white = max(normalized_luma_black + 1, min(255, int(luma_white)))
     normalized_luma_polarity = normalize_luma_polarity(luma_polarity)
     resolved_luma_polarity = resolve_luma_polarity(normalized_luma_polarity, key_rgb)
+    normalized_corridorkey_options = normalize_corridorkey_options(corridorkey_options)
     matte_info = {
         "mode": mode,
         "model_key": "",
@@ -2428,7 +2508,7 @@ def apply_matte_pipeline(
         "repo_id": "",
         "device": "",
         "resolution": 0,
-        "luma_enabled": mode in {"luma", "birefnet_luma"},
+        "luma_enabled": mode == "luma",
         "luma_black": normalized_luma_black,
         "luma_white": normalized_luma_white,
         "luma_gamma": max(0.05, float(luma_gamma or 1.0)),
@@ -2444,15 +2524,13 @@ def apply_matte_pipeline(
         "corridorkey_device": "",
         "corridorkey_resolution": 0,
         "alpha_merge": "",
+        "key_colors": [rgb_to_hex(color) for color in key_rgbs],
     }
-    mode_uses_corridorkey = mode in {
-        "corridorkey",
-        "birefnet_corridorkey",
-    }
-    use_corridorkey = bool((corridorkey_enabled or mode_uses_corridorkey) and mode != "none")
+    mode_uses_corridorkey = mode == "corridorkey"
+    use_corridorkey = mode_uses_corridorkey
     if use_corridorkey:
         matte_info["alpha_aware_despill"] = False
-        matte_info["alpha_aware_despill_method"] = "corridorkey-alpha-only"
+        matte_info["alpha_aware_despill_method"] = "ez-corridorkey"
     resolved_corridorkey_screen = resolve_corridorkey_screen(corridorkey_screen, key_rgb)
 
     if mode == "none":
@@ -2469,6 +2547,7 @@ def apply_matte_pipeline(
                 softness=softness,
                 despill_strength=0.0,
                 halo_pixels=halo_pixels,
+                key_rgbs=key_rgbs if key_mode == "manual" else None,
             )
             if mode == "corridorkey":
                 refined_frame, corridor_info = corridorkey_refine_frame(
@@ -2476,11 +2555,9 @@ def apply_matte_pipeline(
                     chroma_frame.getchannel("A"),
                     ai_device,
                     resolved_corridorkey_screen,
-                    matte_info["despill_strength"],
+                    normalized_corridorkey_options,
                 )
-                keyed_frames.append(
-                    apply_alpha_preserve_source_rgb(raw_image, refined_frame.getchannel("A"))
-                )
+                keyed_frames.append(refined_frame)
             else:
                 frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
                 keyed_frames.append(alpha_aware_despill_frame(raw_image, chroma_frame, frame_key_rgb))
@@ -2511,7 +2588,6 @@ def apply_matte_pipeline(
 
     keyed_frames: list[Image.Image] = []
     ai_info: dict | None = None
-    corridor_info: dict | None = None
     resolved_ai_model = ai_model
     for raw_image in raw_images:
         ai_alpha, ai_info = birefnet_alpha_mask(
@@ -2526,65 +2602,14 @@ def apply_matte_pipeline(
         if matte_info["halo_pixels"] > 0:
             filter_size = (matte_info["halo_pixels"] * 2) + 1
             ai_alpha = ai_alpha.filter(ImageFilter.MinFilter(filter_size))
-        if mode == "birefnet_luma":
-            luma_alpha = luminance_alpha_mask(
-                raw_image,
-                matte_info["luma_black"],
-                max(matte_info["luma_black"] + 1, matte_info["luma_white"]),
-                matte_info["luma_gamma"],
-                matte_info["luma_strength"],
-                polarity=matte_info["luma_resolved_polarity"],
-                key_rgb=key_rgb,
-            )
-            alpha = ImageChops.lighter(ai_alpha, luma_alpha)
-        else:
-            alpha = ai_alpha
+        alpha = ai_alpha
         frame_key_rgb = key_rgb if key_mode == "manual" else auto_key_color(raw_image)
-        if mode == "chroma_birefnet":
-            chroma_alpha = chroma_key_frame(
-                image=raw_image,
-                key_rgb=frame_key_rgb,
-                threshold=threshold,
-                softness=softness,
-                despill_strength=0.0,
-                halo_pixels=halo_pixels,
-            ).getchannel("A")
-            alpha = ImageChops.lighter(ai_alpha, chroma_alpha)
-            matte_info["alpha_merge"] = "chroma+birefnet-union"
-        if use_corridorkey:
-            corridor_input_alpha = alpha
-            if mode == "birefnet_corridorkey":
-                corridor_input_alpha = chroma_key_frame(
-                    image=raw_image,
-                    key_rgb=frame_key_rgb,
-                    threshold=threshold,
-                    softness=softness,
-                    despill_strength=0.0,
-                    halo_pixels=halo_pixels,
-                ).getchannel("A")
-            keyed_frame, corridor_info = corridorkey_refine_frame(
-                raw_image,
-                corridor_input_alpha,
-                ai_device,
-                resolved_corridorkey_screen,
-                matte_info["despill_strength"],
-            )
-            if mode == "birefnet_corridorkey":
-                restored_alpha = ImageChops.lighter(ai_alpha, keyed_frame.getchannel("A"))
-                keyed_frame.putalpha(restored_alpha)
-                matte_info["alpha_merge"] = "birefnet+corridor-union"
-        else:
-            keyed_frame = apply_alpha_mask(raw_image, alpha)
-        if use_corridorkey:
-            keyed_frame = apply_alpha_preserve_source_rgb(raw_image, keyed_frame.getchannel("A"))
-        else:
-            keyed_frame = alpha_aware_despill_frame(raw_image, keyed_frame, frame_key_rgb)
+        keyed_frame = apply_alpha_mask(raw_image, alpha)
+        keyed_frame = alpha_aware_despill_frame(raw_image, keyed_frame, frame_key_rgb)
         keyed_frames.append(keyed_frame)
 
     if ai_info:
         matte_info.update(ai_info)
-    if corridor_info:
-        matte_info.update(corridor_info)
     return keyed_frames, key_rgb, matte_info
 
 
@@ -2841,6 +2866,8 @@ def process_video_to_job(
     batch_background_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
     batch_semitransparent_to_opaque: bool = False,
+    manual_key_colors: list[str] | None = None,
+    corridorkey_options: dict | None = None,
 ) -> dict:
     if preprocess_esr_smoothing:
         require_realesrgan_smoothing_ready()
@@ -2901,7 +2928,6 @@ def process_video_to_job(
         )
         source_entries = []
     raw_images = [open_rgba_image(path) for path in raw_paths]
-    source_color_images = raw_images
     output_scale = normalize_output_scale(output_scale)
     target_size = target_size_from_source_height(max(image.height for image in raw_images), output_scale)
 
@@ -2938,15 +2964,13 @@ def process_video_to_job(
         luma_polarity=luma_polarity,
         corridorkey_enabled=corridorkey_enabled,
         corridorkey_screen=corridorkey_screen,
+        manual_key_colors=manual_key_colors,
+        corridorkey_options=corridorkey_options,
     )
-    if preprocess_esr_smoothing and matte_info["corridorkey_enabled"]:
-        keyed_frames = restore_source_colors_after_matte(
-            source_color_images,
-            keyed_frames,
-        )
-        matte_info["corridorkey_color_source"] = "uploaded-original"
-        preprocess_esr_info["used_for_matte_only"] = True
-
+    key_rgbs = [
+        parse_hex_color(color)
+        for color in (matte_info.get("key_colors") or [rgb_to_hex(key_rgb)])
+    ]
     hard_alpha = matte_info["mode"] == "chroma" and softness == 0 and not matte_info["corridorkey_enabled"]
     if should_preserve_source_canvas(media_type, reduce_px, canvas_mode):
         rendered_frames, bboxes, scale, canvas_size = resize_frames_on_source_canvas(
@@ -2975,10 +2999,10 @@ def process_video_to_job(
         frame_path = processed_dir / frame_name
         thumb_path = thumbs_dir / thumb_name
         if batch_background_to_black:
-            frame, changed = background_to_black_image(frame, key_rgb)
+            frame, changed = background_to_black_image(frame, key_rgb, key_rgbs=key_rgbs)
             postprocess_changed["background_to_black"] += changed
         if batch_background_desaturate:
-            frame, changed = background_desaturate_image(frame, key_rgb)
+            frame, changed = background_desaturate_image(frame, key_rgb, key_rgbs=key_rgbs)
             postprocess_changed["background_desaturate"] += changed
         if batch_semitransparent_to_black:
             frame, changed = semitransparent_to_black_image(frame)
@@ -3031,12 +3055,15 @@ def process_video_to_job(
             "matte": matte_info,
             "key_mode": key_mode,
             "key_color": rgb_to_hex(key_rgb),
+            "key_colors": [rgb_to_hex(color) for color in key_rgbs],
+            "manual_key_colors": [rgb_to_hex(color) for color in key_rgbs] if key_mode == "manual" else [],
             "threshold": threshold,
             "softness": softness,
             "despill_strength": despill_strength,
             "halo_pixels": halo_pixels,
             "corridorkey_enabled": matte_info["corridorkey_enabled"],
             "corridorkey_screen": matte_info["corridorkey_screen_color"],
+            "corridorkey_options": normalize_corridorkey_options(corridorkey_options),
             "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
             "preprocess_esr": preprocess_esr_info,
             "batch_background_to_black": bool(batch_background_to_black),
@@ -3138,12 +3165,38 @@ def background_edge_candidate_mask(image: Image.Image, radius: int = 2) -> Image
     return transparent.filter(ImageFilter.MaxFilter(radius * 2 + 1))
 
 
+def is_background_residue_for_any_key(
+    r_value: int,
+    g_value: int,
+    b_value: int,
+    alpha: int,
+    key_rgbs: list[tuple[int, int, int]],
+    threshold: int,
+    dominance: int,
+    alpha_floor: int,
+) -> bool:
+    return any(
+        is_background_residue_pixel(
+            r_value,
+            g_value,
+            b_value,
+            alpha,
+            key_rgb,
+            threshold,
+            dominance,
+            alpha_floor,
+        )
+        for key_rgb in key_rgbs
+    )
+
+
 def background_to_black_image(
     image: Image.Image,
     key_rgb: tuple[int, int, int],
     threshold: int = 42,
     dominance: int = 24,
     alpha_floor: int = 1,
+    key_rgbs: list[tuple[int, int, int]] | None = None,
 ) -> tuple[Image.Image, int]:
     rgba = image.convert("RGBA")
     output_pixels: list[tuple[int, int, int, int]] = []
@@ -3157,12 +3210,12 @@ def background_to_black_image(
         rgba.getdata(),
         edge_candidates.getdata(),
     ):
-        if is_background_edge and is_background_residue_pixel(
+        if is_background_edge and is_background_residue_for_any_key(
             r_value,
             g_value,
             b_value,
             alpha,
-            key_rgb,
+            key_rgbs or [key_rgb],
             threshold,
             dominance,
             alpha_floor,
@@ -3183,6 +3236,7 @@ def background_desaturate_image(
     threshold: int = 42,
     dominance: int = 24,
     alpha_floor: int = 1,
+    key_rgbs: list[tuple[int, int, int]] | None = None,
 ) -> tuple[Image.Image, int]:
     rgba = image.convert("RGBA")
     output_pixels: list[tuple[int, int, int, int]] = []
@@ -3196,12 +3250,12 @@ def background_desaturate_image(
         rgba.getdata(),
         edge_candidates.getdata(),
     ):
-        if is_background_edge and is_background_residue_pixel(
+        if is_background_edge and is_background_residue_for_any_key(
             r_value,
             g_value,
             b_value,
             alpha,
-            key_rgb,
+            key_rgbs or [key_rgb],
             threshold,
             dominance,
             alpha_floor,
@@ -3224,6 +3278,22 @@ def preview_background_key_rgb(preview: dict) -> tuple[int, int, int]:
         return (0, 255, 0)
 
 
+def preview_background_key_rgbs(preview: dict) -> list[tuple[int, int, int]]:
+    key_colors = preview.get("key_colors")
+    if isinstance(key_colors, list):
+        colors: list[tuple[int, int, int]] = []
+        for raw_color in key_colors:
+            try:
+                color = parse_hex_color(str(raw_color))
+            except ValueError:
+                continue
+            if color not in colors:
+                colors.append(color)
+        if colors:
+            return colors
+    return [preview_background_key_rgb(preview)]
+
+
 def background_to_black_preview(preview_id: str, threshold: int = 42, dominance: int = 24) -> dict:
     preview = load_preview_manifest(preview_id)
     root = preview_dir(preview["preview_id"])
@@ -3238,6 +3308,7 @@ def background_to_black_preview(preview_id: str, threshold: int = 42, dominance:
         key_rgb,
         threshold=threshold,
         dominance=dominance,
+        key_rgbs=preview_background_key_rgbs(preview),
     )
     image.close()
     cleaned.save(processed_path)
@@ -3270,6 +3341,7 @@ def background_desaturate_preview(preview_id: str, threshold: int = 42, dominanc
         key_rgb,
         threshold=threshold,
         dominance=dominance,
+        key_rgbs=preview_background_key_rgbs(preview),
     )
     image.close()
     cleaned.save(processed_path)
@@ -3432,6 +3504,8 @@ def preview_frame(
     batch_background_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
     batch_semitransparent_to_opaque: bool = False,
+    manual_key_colors: list[str] | None = None,
+    corridorkey_options: dict | None = None,
 ) -> dict:
     if preprocess_esr_smoothing:
         require_realesrgan_smoothing_ready()
@@ -3467,7 +3541,6 @@ def preview_frame(
     else:
         _, ffmpeg_accel = extract_single_frame(source_path, raw_path, sample_time)
     raw_image = open_rgba_image(raw_path)
-    source_color_image = raw_image
     output_scale = normalize_output_scale(output_scale)
     target_size = target_size_from_source_height(raw_image.height, output_scale)
 
@@ -3507,14 +3580,13 @@ def preview_frame(
         luma_polarity=luma_polarity,
         corridorkey_enabled=corridorkey_enabled,
         corridorkey_screen=corridorkey_screen,
+        manual_key_colors=manual_key_colors,
+        corridorkey_options=corridorkey_options,
     )
-    if preprocess_esr_smoothing and matte_info["corridorkey_enabled"]:
-        keyed_frames = restore_source_colors_after_matte(
-            [source_color_image],
-            keyed_frames,
-        )
-        matte_info["corridorkey_color_source"] = "uploaded-original"
-        preprocess_esr_info["used_for_matte_only"] = True
+    key_rgbs = [
+        parse_hex_color(color)
+        for color in (matte_info.get("key_colors") or [rgb_to_hex(key_rgb)])
+    ]
     keyed_image = keyed_frames[0]
 
     hard_alpha = matte_info["mode"] == "chroma" and softness == 0 and not matte_info["corridorkey_enabled"]
@@ -3540,10 +3612,10 @@ def preview_frame(
         "semitransparent_to_opaque": 0,
     }
     if batch_background_to_black:
-        rendered_frame, changed = background_to_black_image(rendered_frame, key_rgb)
+        rendered_frame, changed = background_to_black_image(rendered_frame, key_rgb, key_rgbs=key_rgbs)
         postprocess_changed["background_to_black"] += changed
     if batch_background_desaturate:
-        rendered_frame, changed = background_desaturate_image(rendered_frame, key_rgb)
+        rendered_frame, changed = background_desaturate_image(rendered_frame, key_rgb, key_rgbs=key_rgbs)
         postprocess_changed["background_desaturate"] += changed
     if batch_semitransparent_to_black:
         rendered_frame, changed = semitransparent_to_black_image(rendered_frame)
@@ -3564,6 +3636,7 @@ def preview_frame(
         "source_url": f"/work/previews/{preview_id}/source.png",
         "processed_url": f"/work/previews/{preview_id}/processed.png",
         "key_color": rgb_to_hex(key_rgb),
+        "key_colors": [rgb_to_hex(color) for color in key_rgbs],
         "matte": matte_info,
         "ffmpeg_accel": ffmpeg_accel,
         "scale": scale,
@@ -3579,12 +3652,14 @@ def preview_frame(
             "chroma_enabled": chroma_enabled,
             "matte_mode": matte_info["mode"],
             "key_mode": key_mode,
+            "manual_key_colors": [rgb_to_hex(color) for color in key_rgbs] if key_mode == "manual" else [],
             "threshold": threshold,
             "softness": softness,
             "despill_strength": despill_strength,
             "halo_pixels": halo_pixels,
             "corridorkey_enabled": matte_info["corridorkey_enabled"],
             "corridorkey_screen": matte_info["corridorkey_screen_color"],
+            "corridorkey_options": normalize_corridorkey_options(corridorkey_options),
             "preprocess_esr_smoothing": bool(preprocess_esr_smoothing),
             "preprocess_esr": preprocess_esr_info,
             "batch_background_to_black": bool(batch_background_to_black),
@@ -3672,6 +3747,7 @@ def save_preview_as_job(preview_id: str) -> dict:
             "halo_pixels": options.get("halo_pixels") or 0,
             "corridorkey_enabled": bool(options.get("corridorkey_enabled", False)),
             "corridorkey_screen": options.get("corridorkey_screen") or "auto",
+            "corridorkey_options": normalize_corridorkey_options(options.get("corridorkey_options")),
             "scale": preview.get("scale") or 1,
         },
         "frame_count": 1,
@@ -5356,6 +5432,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     ),
                     batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
                     batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
+                    manual_key_colors=payload.get("manual_key_colors"),
+                    corridorkey_options=corridorkey_options_from_payload(payload),
                 )
                 self.send_json({"ok": True, "job": result})
                 return
@@ -5396,6 +5474,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     ),
                     batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
                     batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
+                    manual_key_colors=payload.get("manual_key_colors"),
+                    corridorkey_options=corridorkey_options_from_payload(payload),
                 )
                 self.send_json({"ok": True, "preview": result})
                 return
